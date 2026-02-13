@@ -1,0 +1,157 @@
+// app/src/models.rs
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+use uuid::Uuid;
+use chrono::{DateTime, Utc};
+
+// ─── API Request / Response Models ────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CreateWagerRequest {
+    pub initiator: String,
+    pub stake_lamports: u64,
+    pub description: String,
+    pub expiry_ts: i64,
+    pub resolution_source: String,
+    pub resolver: String,
+    pub oracle_feed: Option<String>,
+    pub oracle_target: Option<i64>,
+    pub oracle_initiator_wins_above: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct AcceptWagerRequest {
+    pub challenger: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ResolveWagerRequest {
+    pub winner: String,
+    pub caller: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ConsentRequest {
+    pub participant: String,
+    pub declared_winner: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DisputeRequest {
+    pub opener: String,
+}
+
+// ─── Wager Record ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct WagerRecord {
+    pub id: Uuid,
+    pub on_chain_address: String,
+    pub wager_id: i64,
+    pub initiator: String,
+    pub challenger: Option<String>,
+    pub stake_lamports: i64,
+    pub description: String,
+    pub status: String,
+    pub resolution_source: String,
+    pub resolver: String,
+    pub expiry_ts: i64,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+    pub winner: Option<String>,
+    pub protocol_fee_bps: i16,
+    pub oracle_feed: Option<String>,
+    pub oracle_target: Option<i64>,
+    pub dispute_opened_at: Option<DateTime<Utc>>,
+    pub dispute_opener: Option<String>,
+}
+
+// ─── User Profile ─────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct UserRecord {
+    pub id: Uuid,
+    pub wallet_address: String,
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+    pub wins: i32,
+    pub losses: i32,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateProfileRequest {
+    pub display_name: Option<String>,
+    pub avatar_url: Option<String>,
+}
+
+// ─── Notifications ──────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct NotificationRecord {
+    pub id: uuid::Uuid,
+    pub user_wallet: String,
+    pub kind: String,
+    pub payload: Option<JsonValue>,
+    pub is_read: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NotificationListQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+// ─── Nonce (Solana auth) ───────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct NonceRecord {
+    pub id: uuid::Uuid,
+    pub wallet: String,
+    pub nonce: String,
+    pub used: bool,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+}
+
+// ─── Transaction Response ─────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TxResponse {
+    pub transaction_b64: String,
+    pub description: String,
+}
+
+// ─── Standard API Response wrapper ───────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApiResponse<T: Serialize> {
+    pub success: bool,
+    pub data: Option<T>,
+    pub error: Option<String>,
+}
+
+impl<T: Serialize> ApiResponse<T> {
+    pub fn ok(data: T) -> Self {
+        Self { success: true, data: Some(data), error: None }
+    }
+}
+
+impl ApiResponse<()> {
+    pub fn err(msg: impl Into<String>) -> Self {
+        Self { success: false, data: None, error: Some(msg.into()) }
+    }
+}
+
+// ─── List / Filter Query Params ───────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct WagerListQuery {
+    pub initiator: Option<String>,
+    pub challenger: Option<String>,
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}

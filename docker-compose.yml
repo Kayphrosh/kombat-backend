@@ -1,0 +1,32 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD: password
+      POSTGRES_DB: wager_db
+    ports:
+      - '5432:5432'
+    volumes:
+      - db_data:/var/lib/postgresql/data
+
+  # Wager API
+  api:
+    build: .
+    restart: on-failure
+    depends_on:
+      - db
+    ports:
+      - '3000:3000'
+    environment:
+      DATABASE_URL: postgres://user:password@db:5432/wager_db
+      SOLANA_RPC_URL: https://api.devnet.solana.com
+      PORT: 3000
+      RUST_LOG: wager_api=debug,tower_http=debug
+
+volumes:
+  db_data:

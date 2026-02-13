@@ -1,0 +1,12 @@
+/target
+**/*.rs.bk
+secrets/
+.env
+.DS_Store
+test-ledger/
+node_modules/
+dist/
+.idea/
+.vscode/
+FRONTEND_INTEGRATION.md
+GCP_DEPLOYMENT.md
