@@ -1,4 +1,5 @@
-/target
+target/
+
 **/*.rs.bk
 secrets/
 .env
@@ -10,3 +11,4 @@ dist/
 .vscode/
 FRONTEND_INTEGRATION.md
 GCP_DEPLOYMENT.md
+DEPLOYMENT.md
