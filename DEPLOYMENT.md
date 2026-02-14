@@ -1,6 +1,5 @@
 # Deployment Guide
 
-Since you are "vibe coding" and not a backend specialist, this guide simplifies the deployment into 3 clear steps.
 
 ## The 3 Parts You Need to Deploy
 
