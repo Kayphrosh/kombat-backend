@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::{
     handlers::wager::AppState,
-    models::{ApiResponse, UpdateProfileRequest, UserRecord},
+    models::{ApiResponse, UpdateProfileRequest, UserRecord, UserStats, NotificationSettings, UpdateNotificationSettings},
 };
 
 type AppResult<T> = Result<Json<ApiResponse<T>>, (StatusCode, Json<ApiResponse<()>>)>;
@@ -41,4 +41,49 @@ pub async fn update_user_profile(
         .map_err(|e: anyhow::Error| internal_error(e.to_string()))?;
 
     Ok(Json(ApiResponse::ok(user)))
+}
+
+// ─── DELETE /users/:wallet ────────────────────────────────────────────────────
+
+pub async fn delete_user(
+    State(state): State<Arc<AppState>>,
+    Path(wallet_address): Path<String>,
+) -> AppResult<()> {
+    state.db.delete_user(&wallet_address).await
+        .map_err(|e| internal_error(e.to_string()))?;
+    Ok(Json(ApiResponse::ok(())))
+}
+
+// ─── GET /users/:wallet/stats ─────────────────────────────────────────────────
+
+pub async fn get_user_stats(
+    State(state): State<Arc<AppState>>,
+    Path(wallet_address): Path<String>,
+) -> AppResult<UserStats> {
+    let stats = state.db.get_user_stats(&wallet_address).await
+        .map_err(|e| internal_error(e.to_string()))?;
+    Ok(Json(ApiResponse::ok(stats)))
+}
+
+// ─── GET /users/:wallet/notification-settings ─────────────────────────────────
+
+pub async fn get_notification_settings(
+    State(state): State<Arc<AppState>>,
+    Path(wallet_address): Path<String>,
+) -> AppResult<NotificationSettings> {
+    let settings = state.db.get_notification_settings(&wallet_address).await
+        .map_err(|e| internal_error(e.to_string()))?;
+    Ok(Json(ApiResponse::ok(settings)))
+}
+
+// ─── PUT /users/:wallet/notification-settings ─────────────────────────────────
+
+pub async fn update_notification_settings(
+    State(state): State<Arc<AppState>>,
+    Path(wallet_address): Path<String>,
+    Json(req): Json<UpdateNotificationSettings>,
+) -> AppResult<NotificationSettings> {
+    let settings = state.db.upsert_notification_settings(&wallet_address, &req).await
+        .map_err(|e| internal_error(e.to_string()))?;
+    Ok(Json(ApiResponse::ok(settings)))
 }

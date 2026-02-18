@@ -219,19 +219,38 @@ impl SolanaService {
             data: anchor_discriminator("cancel_wager"),
         }
     }
+
+    /// Build the `consent_resolve` instruction (mutual consent winner declaration).
+    pub fn ix_consent_resolve(
+        &self,
+        initiator: &Pubkey,
+        wager_id: u64,
+        participant: &Pubkey,
+        _declared_winner: &Pubkey,
+    ) -> Instruction {
+        let (config, _) = self.config_pda();
+        let (wager, _)  = self.wager_pda(initiator, wager_id);
+        let (escrow, _) = self.escrow_pda(&wager);
+
+        Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(config, false),
+                AccountMeta::new(wager, false),
+                AccountMeta::new(escrow, false),
+                AccountMeta::new_readonly(*participant, true),
+            ],
+            data: anchor_discriminator("consent_resolve"),
+        }
+    }
 }
 
-// ─── Anchor discriminator helper ─────────────────────────────────────────────
+// ─── Anchor discriminator helper ─────────────────────────────────────────────────
 /// Produces the 8-byte Anchor instruction discriminator: sha256("global:<name>")[..8]
 fn anchor_discriminator(name: &str) -> Vec<u8> {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use sha2::{Sha256, Digest};
 
-    // NOTE: In production, generate proper SHA-256 discriminators via anchor-syn
-    // or pre-compute them from the IDL. This is a placeholder for scaffolding.
     let preimage = format!("global:{}", name);
-    let mut hasher = DefaultHasher::new();
-    preimage.hash(&mut hasher);
-    let hash = hasher.finish();
-    hash.to_le_bytes().to_vec()
+    let hash = Sha256::digest(preimage.as_bytes());
+    hash[..8].to_vec()
 }

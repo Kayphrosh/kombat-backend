@@ -155,3 +155,54 @@ pub struct WagerListQuery {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
+
+// ─── User Stats ──────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UserStats {
+    pub live_count: i64,
+    pub completed_count: i64,
+    pub total_stake: i64,
+    pub total_won: i64,
+}
+
+// ─── Notification Settings ───────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct NotificationSettings {
+    pub user_wallet: String,
+    pub challenges: bool,
+    pub funds: bool,
+    pub disputes: bool,
+    pub marketing: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UpdateNotificationSettings {
+    pub challenges: Option<bool>,
+    pub funds: Option<bool>,
+    pub disputes: Option<bool>,
+    pub marketing: Option<bool>,
+}
+
+// ─── Dynamic SDK Auth ────────────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct DynamicAuthRequest {
+    #[serde(alias = "dynamicToken")]
+    pub dynamic_token: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DynamicAuthResponse {
+    pub user: UserRecord,
+    #[serde(rename = "accessToken")]
+    pub access_token: String,
+}
+
+// ─── Upload Response ─────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct UploadResponse {
+    pub url: String,
+}

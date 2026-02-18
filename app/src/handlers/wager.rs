@@ -34,6 +34,10 @@ pub struct AppState {
     // Prometheus metrics (optional)
     pub rate_limit_exceeded: Option<std::sync::Arc<prometheus::IntCounter>>,
     pub rate_limit_requests: Option<std::sync::Arc<prometheus::IntCounter>>,
+    // Dynamic SDK service for JWT verification (optional — only if DYNAMIC_ENVIRONMENT_ID is set)
+    pub dynamic_service: Option<Arc<crate::services::DynamicService>>,
+    // Upload service (optional — only if UPLOAD_DIR is set)
+    pub upload_service: Option<Arc<crate::services::UploadService>>,
 }
 
 type AppResult<T> = Result<Json<ApiResponse<T>>, (StatusCode, Json<ApiResponse<()>>)>;
@@ -341,5 +345,41 @@ pub async fn dispute_wager(
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: format!("Open dispute on wager #{}", wager.wager_id),
+    })))
+}
+
+// ─── POST /wagers/:address/consent ────────────────────────────────────────────
+
+pub async fn consent_wager(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+    Json(req): Json<ConsentRequest>,
+) -> AppResult<TxResponse> {
+    let wager = state.db.get_wager_by_address(&address).await
+        .map_err(|e| internal_error(e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(ApiResponse::err("Wager not found"))))?;
+
+    let initiator = Pubkey::from_str(&wager.initiator)
+        .map_err(|_| internal_error("Invalid initiator pubkey"))?;
+    let participant = Pubkey::from_str(&req.participant)
+        .map_err(|_| bad_request("Invalid participant pubkey"))?;
+    let declared_winner = Pubkey::from_str(&req.declared_winner)
+        .map_err(|_| bad_request("Invalid declared_winner pubkey"))?;
+
+    let ix = state.solana.ix_consent_resolve(
+        &initiator,
+        wager.wager_id as u64,
+        &participant,
+        &declared_winner,
+    );
+
+    let tx_b64 = state.solana
+        .build_transaction(vec![ix], &participant)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    Ok(Json(ApiResponse::ok(TxResponse {
+        transaction_b64: tx_b64,
+        description: format!("Consent resolve wager #{} — declared winner: {}", wager.wager_id, req.declared_winner),
     })))
 }
