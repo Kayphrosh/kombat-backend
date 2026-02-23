@@ -157,6 +157,14 @@ pub async fn verify_signature(
     state.db.consume_nonce(&req.wallet, &nonce_rec.nonce).await
         .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(crate::models::ApiResponse::err(e.to_string()))))?;
 
+    // Upsert the user (create if first login) — similar to verify_dynamic
+    let profile_req = crate::models::UpdateProfileRequest {
+        display_name: None,
+        avatar_url: None,
+    };
+    state.db.upsert_user(&req.wallet, &profile_req).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(crate::models::ApiResponse::err(format!("Failed to upsert user: {}", e)))))?;
+
     // mint JWT
     let ttl = 15 * 60;
     let exp = (chrono::Utc::now() + chrono::Duration::seconds(ttl as i64)).timestamp() as usize;

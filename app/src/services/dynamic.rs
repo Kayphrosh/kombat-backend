@@ -197,9 +197,7 @@ impl DynamicService {
         validation.validate_exp = true;
         validation.leeway = 30;
         // Dynamic tokens may not have standard aud/iss — accept any
-        validation.set_audience::<String>(&[]);
-        validation.set_issuer::<String>(&[]);
-        validation.set_required_spec_claims::<String>(&[]);
+        validation.set_required_spec_claims::<String>(&[]); // No required claims
 
         let data = decode::<DynamicClaims>(token, &decoding_key, &validation)
             .map_err(|e| anyhow!("JWT decode error: {}", e))?;

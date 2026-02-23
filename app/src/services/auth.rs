@@ -24,11 +24,6 @@ pub fn verify_jwt_get_wallet(token: &str, secret: &str) -> Result<String> {
     Ok(token_data.claims.wallet)
 }
 
-/// Verify an ed25519 signature where `pubkey_base58` is a base58-encoded
-/// public key (Solana-style), `sig_bytes` are the raw 64-byte signature bytes,
-/// and `message` is the original message bytes that were signed.
-///
-/// Uses solana_sdk types to avoid a direct ed25519-dalek dependency.
 pub fn verify_ed25519_signature(pubkey_base58: &str, sig_bytes: &[u8], message: &[u8]) -> Result<()> {
     let pubkey = Pubkey::from_str(pubkey_base58)
         .map_err(|e| anyhow!("invalid pubkey: {}", e))?;
