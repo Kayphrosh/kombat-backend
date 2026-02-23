@@ -1,5 +1,5 @@
 # 1. Build Stage
-FROM rust:1.77-slim-bookworm as builder
+FROM rust:1.85-slim-bookworm as builder
 
 WORKDIR /usr/src/kombat-backend
 
@@ -25,11 +25,11 @@ RUN apt-get update && apt-get install -y ca-certificates libssl3 && rm -rf /var/
 COPY --from=builder /usr/src/kombat-backend/target/release/wager-api /usr/local/bin/wager-api
 
 # Set default env vars
-ENV PORT=8080
+ENV PORT=3000
 ENV RUST_LOG=info
 
 # Expose port
-EXPOSE 8080
+EXPOSE 3000
 
 
 # Run the binary
