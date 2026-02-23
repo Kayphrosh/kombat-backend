@@ -31,5 +31,4 @@ ENV RUST_LOG=info
 EXPOSE 3000
 
 
-# Run the binary
 CMD ["wager-api"]
