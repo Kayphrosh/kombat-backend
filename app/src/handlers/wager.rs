@@ -112,10 +112,34 @@ pub async fn create_wager(
     let initiator = Pubkey::from_str(&req.initiator)
         .map_err(|_| bad_request("Invalid initiator pubkey"))?;
 
-    // ── Look up current wager_id from registry ─────────────────────────────
-    // In production: fetch the on-chain WagerRegistry account via RPC.
-    // For scaffold, default to 0.
-    let wager_id: u64 = 0;
+    // ── Check if the user's WagerRegistry exists on-chain ──────────────────
+    let (registry_pda, _) = state.solana.registry_pda(&initiator);
+    let registry_account = state.solana.rpc.get_account(&registry_pda).await;
+
+    let mut instructions = Vec::new();
+    let wager_id: u64;
+
+    match registry_account {
+        Ok(account) => {
+            // Registry exists — read wager_count from the account data
+            // Layout: 8 (discriminator) + 1 (bump) + 32 (authority) + 8 (wager_count)
+            let data = &account.data;
+            if data.len() >= 49 {
+                let count_bytes: [u8; 8] = data[41..49].try_into()
+                    .map_err(|_| internal_error("Failed to read wager_count from registry"))?;
+                wager_id = u64::from_le_bytes(count_bytes);
+            } else {
+                wager_id = 0;
+            }
+        }
+        Err(_) => {
+            // Registry doesn't exist — prepend an initialize_registry instruction
+            tracing::info!("Registry not found for {}, will auto-initialize", initiator);
+            let init_ix = state.solana.ix_initialize_registry(&initiator);
+            instructions.push(init_ix);
+            wager_id = 0;
+        }
+    }
 
     // ── Borsh-serialize the instruction args ──────────────────────────────────
     let resolution_source = match req.resolution_source.to_lowercase().as_str() {
@@ -125,7 +149,7 @@ pub async fn create_wager(
     };
 
     let resolver = Pubkey::from_str(&req.resolver)
-        .unwrap_or_else(|_| initiator); // fallback to initiator or config treasury if parsing fails
+        .unwrap_or_else(|_| initiator); // fallback to initiator
 
     let oracle_feed = req.oracle_feed.as_deref()
         .and_then(|f| Pubkey::from_str(f).ok());
@@ -145,9 +169,10 @@ pub async fn create_wager(
         .map_err(|e| internal_error(format!("Borsh serialization failed: {}", e)))?;
 
     let ix = state.solana.ix_create_wager(&initiator, wager_id, args_data);
+    instructions.push(ix);
 
     let tx_b64 = state.solana
-        .build_transaction(vec![ix], &initiator)
+        .build_transaction(instructions, &initiator)
         .await
         .map_err(|e| internal_error(e.to_string()))?;
 
