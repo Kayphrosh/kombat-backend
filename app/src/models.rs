@@ -72,6 +72,7 @@ pub struct WagerRecord {
 pub struct UserRecord {
     pub id: Uuid,
     pub wallet_address: String,
+    pub email: Option<String>,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
     pub wins: i32,
@@ -82,6 +83,7 @@ pub struct UserRecord {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateProfileRequest {
+    pub email: Option<String>,
     pub display_name: Option<String>,
     pub avatar_url: Option<String>,
 }

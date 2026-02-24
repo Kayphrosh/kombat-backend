@@ -159,6 +159,7 @@ pub async fn verify_signature(
 
     // Upsert the user (create if first login) — similar to verify_dynamic
     let profile_req = crate::models::UpdateProfileRequest {
+        email: None,
         display_name: None,
         avatar_url: None,
     };
@@ -203,6 +204,7 @@ pub async fn verify_dynamic(
     // Upsert the user (create if first login)
     let display_name = claims.email_address(); // use email as initial display name if available
     let profile_req = crate::models::UpdateProfileRequest {
+        email: claims.email_address(),
         display_name,
         avatar_url: None,
     };

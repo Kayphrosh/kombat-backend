@@ -217,7 +217,7 @@ impl DbService {
 
     pub async fn get_user(&self, wallet: &str) -> Result<Option<UserRecord>> {
         let row = sqlx::query_as::<_, UserRecord>(
-            r#"SELECT id, wallet_address, display_name, avatar_url,
+            r#"SELECT id, wallet_address, email, display_name, avatar_url,
                       wins, losses, created_at, updated_at
                FROM users WHERE wallet_address = $1"#,
         )
@@ -233,16 +233,18 @@ impl DbService {
         req: &UpdateProfileRequest,
     ) -> Result<UserRecord> {
         let row = sqlx::query_as::<_, UserRecord>(
-            r#"INSERT INTO users (wallet_address, display_name, avatar_url)
-               VALUES ($1, $2, $3)
+            r#"INSERT INTO users (wallet_address, email, display_name, avatar_url)
+               VALUES ($1, $2, $3, $4)
                ON CONFLICT (wallet_address) DO UPDATE SET
+                   email        = COALESCE(EXCLUDED.email,        users.email),
                    display_name = COALESCE(EXCLUDED.display_name, users.display_name),
                    avatar_url   = COALESCE(EXCLUDED.avatar_url,   users.avatar_url),
                    updated_at   = NOW()
-               RETURNING id, wallet_address, display_name, avatar_url,
+               RETURNING id, wallet_address, email, display_name, avatar_url,
                          wins, losses, created_at, updated_at"#,
         )
         .bind(wallet)
+        .bind(&req.email)
         .bind(&req.display_name)
         .bind(&req.avatar_url)
         .fetch_one(&self.pool)
