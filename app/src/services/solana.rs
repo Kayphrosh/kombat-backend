@@ -86,7 +86,6 @@ impl SolanaService {
     /// Build the `initialize_registry` instruction for a new user.
     pub fn ix_initialize_registry(&self, authority: &Pubkey) -> Instruction {
         let (registry, _) = self.registry_pda(authority);
-        let (config, _)   = self.config_pda();
 
         // Anchor discriminator: sha256("global:initialize_registry")[..8]
         let data = anchor_discriminator("initialize_registry");
@@ -95,7 +94,7 @@ impl SolanaService {
         Instruction {
             program_id: self.program_id,
             accounts: vec![
-                AccountMeta::new(config, false),
+                // Must match: InitializeRegistry { registry, authority, system_program }
                 AccountMeta::new(registry, false),
                 AccountMeta::new(*authority, true),
                 AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
