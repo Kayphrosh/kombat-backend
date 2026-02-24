@@ -73,6 +73,27 @@ pub async fn get_wager(
     Ok(Json(ApiResponse::ok(wager)))
 }
 
+// ─── Anchor Instruction Structs ────────────────────────────────────────────────
+
+#[derive(borsh::BorshSerialize)]
+pub enum ResolutionSource {
+    Arbitrator,
+    OracleFeed,
+    MutualConsent,
+}
+
+#[derive(borsh::BorshSerialize)]
+pub struct CreateWagerArgs {
+    pub description: String,
+    pub stake_lamports: u64,
+    pub expiry_ts: i64,
+    pub resolution_source: ResolutionSource,
+    pub resolver: Pubkey,
+    pub oracle_feed: Option<Pubkey>,
+    pub oracle_target: Option<i64>,
+    pub oracle_initiator_wins_above: Option<bool>,
+}
+
 // ─── POST /wagers ─────────────────────────────────────────────────────────────
 /// Returns an unsigned transaction the client must sign with the initiator's wallet.
 
@@ -97,9 +118,31 @@ pub async fn create_wager(
     let wager_id: u64 = 0;
 
     // ── Borsh-serialize the instruction args ──────────────────────────────────
-    // In production, import the wager crate's CreateWagerArgs and use borsh.
-    // Here we stub with empty bytes to illustrate the pattern.
-    let args_data: Vec<u8> = Vec::new(); // replace with borsh::to_vec(&args)?
+    let resolution_source = match req.resolution_source.to_lowercase().as_str() {
+        "oracle" | "oraclefeed" => ResolutionSource::OracleFeed,
+        "mutual" | "mutualconsent" => ResolutionSource::MutualConsent,
+        _ => ResolutionSource::Arbitrator, // defaults to Arbitrator (manual)
+    };
+
+    let resolver = Pubkey::from_str(&req.resolver)
+        .unwrap_or_else(|_| initiator); // fallback to initiator or config treasury if parsing fails
+
+    let oracle_feed = req.oracle_feed.as_deref()
+        .and_then(|f| Pubkey::from_str(f).ok());
+
+    let args = CreateWagerArgs {
+        description: req.description.clone(),
+        stake_lamports: req.stake_lamports,
+        expiry_ts: req.expiry_ts,
+        resolution_source,
+        resolver,
+        oracle_feed,
+        oracle_target: req.oracle_target,
+        oracle_initiator_wins_above: req.oracle_initiator_wins_above,
+    };
+
+    let args_data = borsh::to_vec(&args)
+        .map_err(|e| internal_error(format!("Borsh serialization failed: {}", e)))?;
 
     let ix = state.solana.ix_create_wager(&initiator, wager_id, args_data);
 
