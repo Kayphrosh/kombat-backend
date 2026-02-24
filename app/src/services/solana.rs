@@ -122,12 +122,17 @@ impl SolanaService {
         Instruction {
             program_id: self.program_id,
             accounts: vec![
+                // 1. config
                 AccountMeta::new_readonly(config, false),
+                // 2. registry
                 AccountMeta::new(registry, false),
+                // 3. wager
                 AccountMeta::new(wager, false),
+                // 4. escrow
                 AccountMeta::new(escrow, false),
+                // 5. initiator
                 AccountMeta::new(*initiator, true),
-                AccountMeta::new_readonly(*initiator, false), // authority
+                // 6. system_program
                 AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
             ],
             data,
