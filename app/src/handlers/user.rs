@@ -87,3 +87,15 @@ pub async fn update_notification_settings(
         .map_err(|e| internal_error(e.to_string()))?;
     Ok(Json(ApiResponse::ok(settings)))
 }
+
+// ─── POST /users/:wallet/push-token ───────────────────────────────────────────
+
+pub async fn register_push_token(
+    State(state): State<Arc<AppState>>,
+    Path(wallet_address): Path<String>,
+    Json(req): Json<crate::models::RegisterPushTokenRequest>,
+) -> AppResult<()> {
+    state.db.upsert_push_token(&wallet_address, &req.expo_token).await
+        .map_err(|e| internal_error(e.to_string()))?;
+    Ok(Json(ApiResponse::ok(())))
+}

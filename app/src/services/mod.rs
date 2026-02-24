@@ -6,6 +6,7 @@ pub mod auth;
 pub mod redis;
 pub mod dynamic;
 pub mod upload;
+pub mod push;
 
 pub use db::DbService;
 pub use solana::SolanaService;

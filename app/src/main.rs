@@ -25,6 +25,7 @@ use handlers::auth::mint_token;
 use handlers::user::{
     get_user_profile, update_user_profile, delete_user,
     get_user_stats, get_notification_settings, update_notification_settings,
+    register_push_token,
 };
 use handlers::upload::upload_file;
 use services::{DbService, SolanaService, IndexerService};
@@ -172,6 +173,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/users/:wallet",                       get(get_user_profile).post(update_user_profile).delete(delete_user))
         .route("/api/users/:wallet/stats",                 get(get_user_stats))
         .route("/api/users/:wallet/notification-settings", get(get_notification_settings).put(update_notification_settings))
+        .route("/api/users/:wallet/push-token",             post(register_push_token))
+        .route("/users/:wallet/push-token",                 post(register_push_token))
 
         // ── Notifications ────────────────────────────────────────────────────
         .route("/notifications/:wallet",          get(list_notifications))

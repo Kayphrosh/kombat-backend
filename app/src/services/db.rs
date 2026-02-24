@@ -357,4 +357,29 @@ impl DbService {
         .await?;
         Ok(row)
     }
+
+    // ── Push Tokens ──────────────────────────────────────────────────────────
+
+    pub async fn upsert_push_token(&self, wallet: &str, token: &str) -> Result<()> {
+        sqlx::query(
+            r#"INSERT INTO push_tokens (wallet_address, expo_token)
+               VALUES ($1, $2)
+               ON CONFLICT (wallet_address, expo_token) DO NOTHING"#,
+        )
+        .bind(wallet)
+        .bind(token)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_push_tokens(&self, wallet: &str) -> Result<Vec<String>> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT expo_token FROM push_tokens WHERE wallet_address = $1"
+        )
+        .bind(wallet)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows.into_iter().map(|r| r.0).collect())
+    }
 }

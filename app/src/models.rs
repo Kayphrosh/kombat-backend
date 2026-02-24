@@ -14,9 +14,15 @@ pub struct CreateWagerRequest {
     pub expiry_ts: i64,
     pub resolution_source: String,
     pub resolver: String,
+    pub challenger_address: Option<String>,
     pub oracle_feed: Option<String>,
     pub oracle_target: Option<i64>,
     pub oracle_initiator_wins_above: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RegisterPushTokenRequest {
+    pub expo_token: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

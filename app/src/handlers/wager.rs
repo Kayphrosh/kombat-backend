@@ -176,6 +176,77 @@ pub async fn create_wager(
         .await
         .map_err(|e| internal_error(e.to_string()))?;
 
+    // ── Store a pending wager record in the DB immediately ────────────────────
+    let (wager_pda, _) = state.solana.wager_pda(&initiator, wager_id);
+    let on_chain_address = wager_pda.to_string();
+
+    let wager_record = crate::models::WagerRecord {
+        id: uuid::Uuid::new_v4(),
+        on_chain_address: on_chain_address.clone(),
+        wager_id: wager_id as i64,
+        initiator: req.initiator.clone(),
+        challenger: req.challenger_address.clone(),
+        stake_lamports: req.stake_lamports as i64,
+        description: req.description.clone(),
+        status: "pending".to_string(),
+        resolution_source: req.resolution_source.clone(),
+        resolver: req.resolver.clone(),
+        expiry_ts: req.expiry_ts,
+        created_at: chrono::Utc::now(),
+        resolved_at: None,
+        winner: None,
+        protocol_fee_bps: 100, // 1% default
+        oracle_feed: req.oracle_feed.clone(),
+        oracle_target: req.oracle_target,
+        dispute_opened_at: None,
+        dispute_opener: None,
+    };
+
+    // Fire-and-forget DB insert + push notification
+    let db = state.db.clone();
+    let notif_tx = state.notif_tx.clone();
+    let challenger_addr = req.challenger_address.clone();
+    let desc_clone = req.description.clone();
+    tokio::spawn(async move {
+        // Insert wager record
+        if let Err(e) = db.upsert_wager(&wager_record).await {
+            tracing::error!("Failed to insert pending wager: {}", e);
+        }
+
+        // Notify the challenged user (if specified)
+        if let Some(ref challenger) = challenger_addr {
+            let payload = serde_json::json!({
+                "wager_address": on_chain_address,
+                "initiator": wager_record.initiator,
+                "description": desc_clone,
+                "stake_lamports": wager_record.stake_lamports,
+            });
+
+            // In-app notification
+            if let Err(e) = db.create_notification(challenger, "wager_challenge", Some(payload.clone())).await {
+                tracing::error!("Failed to create challenge notification: {}", e);
+            }
+            let _ = notif_tx.send((challenger.clone(), payload.clone()));
+
+            // Push notification via Expo
+            match db.get_push_tokens(challenger).await {
+                Ok(tokens) if !tokens.is_empty() => {
+                    let title = "New Kombat Challenge!".to_string();
+                    let body = format!("You've been challenged: \"{}\" for {} SOL",
+                        desc_clone,
+                        wager_record.stake_lamports as f64 / 1_000_000_000.0
+                    );
+                    tokio::spawn(async move {
+                        if let Err(e) = crate::services::push::send_expo_push(&tokens, &title, &body, Some(payload)).await {
+                            tracing::error!("Failed to send push notification: {}", e);
+                        }
+                    });
+                }
+                _ => {}
+            }
+        }
+    });
+
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: format!(
