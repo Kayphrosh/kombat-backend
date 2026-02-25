@@ -202,7 +202,15 @@ pub async fn verify_dynamic(
         .ok_or_else(|| (StatusCode::BAD_REQUEST, Json(crate::models::ApiResponse::err("No wallet address in Dynamic token"))))?;
 
     // Upsert the user (create if first login)
-    let display_name = claims.email_address(); // use email as initial display name if available
+    // Only set display_name from email for NEW users who don't have one yet
+    let existing_user = state.db.get_user(&wallet).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(crate::models::ApiResponse::err(format!("DB error: {}", e)))))?;
+
+    let display_name = match &existing_user {
+        Some(u) if u.display_name.is_some() => None, // keep existing name
+        _ => claims.email_address(),                  // new user or no name set
+    };
+
     let profile_req = crate::models::UpdateProfileRequest {
         email: claims.email_address(),
         display_name,
