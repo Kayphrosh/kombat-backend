@@ -177,8 +177,8 @@ pub async fn create_wager(
     // ── Borsh-serialize the instruction args ──────────────────────────────────
     let resolution_source = match req.resolution_source.to_lowercase().as_str() {
         "oracle" | "oraclefeed" => ResolutionSource::OracleFeed,
-        "mutual" | "mutualconsent" => ResolutionSource::MutualConsent,
-        _ => ResolutionSource::Arbitrator, // defaults to Arbitrator (manual)
+        "arbitrator" => ResolutionSource::Arbitrator,
+        _ => ResolutionSource::MutualConsent, // default to MutualConsent so both parties can declare winner
     };
 
     let resolver = Pubkey::from_str(&req.resolver)
@@ -564,9 +564,9 @@ pub async fn dispute_wager(
 }
 
 // ─── POST /wagers/:address/declare-winner ─────────────────────────────────────
-/// Routes to the correct on-chain instruction based on the wager's resolution_source:
-///   - "arbitrator" / "manual" → resolve_by_arbitrator (participant must be the resolver)
-///   - "mutualconsent" / "mutual" → consent_resolve (both participants must consent)
+/// Smart routing based on resolution_source AND who is calling:
+///   - Arbitrator wagers: only the resolver can call → resolve_by_arbitrator
+///   - MutualConsent wagers: either participant → consent_resolve (auto-pays when both agree)
 
 pub async fn consent_wager(
     State(state): State<Arc<AppState>>,
@@ -589,9 +589,28 @@ pub async fn consent_wager(
         .map_err(|e| internal_error(format!("Failed to read treasury: {}", e)))?;
 
     let resolution = wager.resolution_source.to_lowercase();
+    let resolver_str = wager.resolver.clone();
+    let caller_is_resolver = req.participant == resolver_str;
 
-    let (ix, desc) = if resolution == "mutualconsent" || resolution == "mutual_consent" || resolution == "mutual" {
-        // MutualConsent → consent_resolve (both participants must consent)
+    let (ix, desc) = if resolution == "arbitrator" || resolution == "manual" {
+        // Arbitrator wager — only the designated resolver can resolve
+        if !caller_is_resolver {
+            return Err(bad_request(format!(
+                "Only the resolver ({}) can declare the winner for arbitrator wagers. \
+                 You ({}) are not the resolver.",
+                resolver_str, req.participant
+            )));
+        }
+        let ix = state.solana.ix_resolve_by_arbitrator(
+            &initiator,
+            wager.wager_id as u64,
+            &declared_winner,
+            &participant,  // participant IS the resolver
+            &treasury,
+        );
+        (ix, format!("Resolve wager #{} — winner: {}", wager.wager_id, req.declared_winner))
+    } else {
+        // MutualConsent — either participant can consent, auto-pays when both agree
         let ix = state.solana.ix_consent_resolve(
             &initiator,
             wager.wager_id as u64,
@@ -599,19 +618,7 @@ pub async fn consent_wager(
             &declared_winner,
             &treasury,
         );
-        let desc = format!("Consent resolve wager #{} — declared winner: {}", wager.wager_id, req.declared_winner);
-        (ix, desc)
-    } else {
-        // Arbitrator / manual → resolve_by_arbitrator (participant is the resolver/signer)
-        let ix = state.solana.ix_resolve_by_arbitrator(
-            &initiator,
-            wager.wager_id as u64,
-            &declared_winner,
-            &participant,  // participant acts as the resolver/signer
-            &treasury,
-        );
-        let desc = format!("Resolve wager #{} — winner: {}", wager.wager_id, req.declared_winner);
-        (ix, desc)
+        (ix, format!("Consent resolve wager #{} — declared winner: {}", wager.wager_id, req.declared_winner))
     };
 
     let tx_b64 = state.solana
