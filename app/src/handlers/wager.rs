@@ -234,6 +234,8 @@ pub async fn create_wager(
         dispute_opened_at: None,
         dispute_opener: None,
         initiator_option: req.initiator_option.clone(),
+        creator_declared_winner: None,
+        challenger_declared_winner: None,
     };
 
     // Fire-and-forget DB insert + push notification
@@ -326,7 +328,11 @@ pub async fn accept_wager(
     let redis_client = state.redis_client.clone();
     tokio::spawn(async move {
         let payload = serde_json::json!({ "wager_address": addr_clone, "challenger": challenger_clone });
-        // persist
+        // Update status to active
+        if let Err(e) = db.update_wager_status(&addr_clone, "active").await {
+            tracing::error!("failed to update wager status to active: {}", e);
+        }
+        // persist notification
         if let Err(e) = db.create_notification(&initiator_wallet, "wager_accepted", Some(payload.clone())).await {
             tracing::error!("failed to create notification: {}", e);
         }
@@ -625,6 +631,25 @@ pub async fn consent_wager(
         .build_transaction(vec![ix], &participant)
         .await
         .map_err(|e| internal_error(e.to_string()))?;
+
+    // Fire-and-forget: track who declared which winner in the DB
+    let db = state.db.clone();
+    let addr = address.clone();
+    let is_initiator = req.participant == wager.initiator;
+    let winner_str = req.declared_winner.clone();
+    tokio::spawn(async move {
+        match db.set_declared_winner(&addr, is_initiator, &winner_str).await {
+            Ok(Some(agreed_winner)) => {
+                tracing::info!("Both parties agreed — wager {} resolved, winner: {}", addr, agreed_winner);
+            }
+            Ok(None) => {
+                tracing::info!("Declared winner recorded for wager {}", addr);
+            }
+            Err(e) => {
+                tracing::error!("Failed to store declared winner: {}", e);
+            }
+        }
+    });
 
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,

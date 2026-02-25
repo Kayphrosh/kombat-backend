@@ -114,10 +114,12 @@ impl DbService {
                 stake_lamports, description, status, resolution_source,
                 resolver, expiry_ts, created_at, resolved_at, winner,
                 protocol_fee_bps, oracle_feed, oracle_target,
-                dispute_opened_at, dispute_opener, initiator_option
+                dispute_opened_at, dispute_opener, initiator_option,
+                creator_declared_winner, challenger_declared_winner
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+                $21, $22
             )
             ON CONFLICT (on_chain_address) DO UPDATE SET
                 challenger       = EXCLUDED.challenger,
@@ -148,6 +150,8 @@ impl DbService {
         .bind(w.dispute_opened_at)
         .bind(&w.dispute_opener)
         .bind(&w.initiator_option)
+        .bind(&w.creator_declared_winner)
+        .bind(&w.challenger_declared_winner)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -160,7 +164,8 @@ impl DbService {
                 stake_lamports, description, status, resolution_source,
                 resolver, expiry_ts, created_at, resolved_at, winner,
                 protocol_fee_bps, oracle_feed, oracle_target,
-                dispute_opened_at, dispute_opener, initiator_option
+                dispute_opened_at, dispute_opener, initiator_option,
+                creator_declared_winner, challenger_declared_winner
               FROM wagers WHERE on_chain_address = $1"#,
         )
         .bind(address)
@@ -218,7 +223,8 @@ impl DbService {
                stake_lamports, description, status, resolution_source,
                resolver, expiry_ts, created_at, resolved_at, winner,
                protocol_fee_bps, oracle_feed, oracle_target,
-               dispute_opened_at, dispute_opener, initiator_option
+               dispute_opened_at, dispute_opener, initiator_option,
+               creator_declared_winner, challenger_declared_winner
                FROM wagers WHERE 1=1"#,
         );
 
@@ -254,6 +260,55 @@ impl DbService {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Store which winner a participant declared and auto-resolve if both agree.
+    pub async fn set_declared_winner(
+        &self,
+        address: &str,
+        is_initiator: bool,
+        declared_winner: &str,
+    ) -> Result<Option<String>> {
+        // Update the appropriate column
+        let col = if is_initiator {
+            "creator_declared_winner"
+        } else {
+            "challenger_declared_winner"
+        };
+
+        let query = format!(
+            "UPDATE wagers SET {} = $1 WHERE on_chain_address = $2",
+            col
+        );
+        sqlx::query(&query)
+            .bind(declared_winner)
+            .bind(address)
+            .execute(&self.pool)
+            .await?;
+
+        // Check if both sides now agree on the same winner
+        let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+            "SELECT creator_declared_winner, challenger_declared_winner FROM wagers WHERE on_chain_address = $1"
+        )
+        .bind(address)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if let Some((Some(creator_pick), Some(challenger_pick))) = row {
+            if creator_pick == challenger_pick {
+                // Both agree — mark as resolved
+                sqlx::query(
+                    "UPDATE wagers SET status = 'resolved', winner = $1, resolved_at = NOW() WHERE on_chain_address = $2"
+                )
+                .bind(&creator_pick)
+                .bind(address)
+                .execute(&self.pool)
+                .await?;
+                return Ok(Some(creator_pick));
+            }
+        }
+
+        Ok(None)
     }
 
     // ── User Profile ──────────────────────────────────────────────────────────

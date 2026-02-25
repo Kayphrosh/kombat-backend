@@ -72,6 +72,8 @@ pub struct WagerRecord {
     pub dispute_opened_at: Option<DateTime<Utc>>,
     pub dispute_opener: Option<String>,
     pub initiator_option: Option<String>,
+    pub creator_declared_winner: Option<String>,
+    pub challenger_declared_winner: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
