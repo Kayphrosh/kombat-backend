@@ -1,14 +1,18 @@
 // programs/wager/src/resolve_wager.rs
 use anchor_lang::prelude::*;
+use anchor_lang::solana_program;
 use crate::{state::*, errors::WagerError};
 
 // ─── Shared payout helper ─────────────────────────────────────────────────────
+/// Uses invoke_signed with the escrow PDA seeds to transfer SOL out.
 
 fn payout_winner<'info>(
     wager: &Account<'info, Wager>,
     escrow: &UncheckedAccount<'info>,
     winner_account: &UncheckedAccount<'info>,
     treasury: &UncheckedAccount<'info>,
+    system_program: &AccountInfo<'info>,
+    escrow_bump: u8,
 ) -> Result<()> {
     let total_pot  = escrow.lamports();
     let fee_amount = (total_pot as u128)
@@ -21,12 +25,45 @@ fn payout_winner<'info>(
         .checked_sub(fee_amount)
         .ok_or(WagerError::Overflow)?;
 
-    **escrow.try_borrow_mut_lamports()? -= winner_payout;
-    **winner_account.try_borrow_mut_lamports()? += winner_payout;
+    let wager_key = wager.key();
+    let escrow_seeds: &[&[u8]] = &[
+        b"escrow",
+        wager_key.as_ref(),
+        &[escrow_bump],
+    ];
 
+    // Transfer winner's payout
+    if winner_payout > 0 {
+        solana_program::program::invoke_signed(
+            &solana_program::system_instruction::transfer(
+                &escrow.key(),
+                &winner_account.key(),
+                winner_payout,
+            ),
+            &[
+                escrow.to_account_info(),
+                winner_account.to_account_info(),
+                system_program.clone(),
+            ],
+            &[escrow_seeds],
+        )?;
+    }
+
+    // Transfer protocol fee to treasury
     if fee_amount > 0 {
-        **escrow.try_borrow_mut_lamports()? -= fee_amount;
-        **treasury.try_borrow_mut_lamports()? += fee_amount;
+        solana_program::program::invoke_signed(
+            &solana_program::system_instruction::transfer(
+                &escrow.key(),
+                &treasury.key(),
+                fee_amount,
+            ),
+            &[
+                escrow.to_account_info(),
+                treasury.to_account_info(),
+                system_program.clone(),
+            ],
+            &[escrow_seeds],
+        )?;
     }
 
     msg!(
@@ -84,6 +121,8 @@ pub struct ResolveByArbitrator<'info> {
 
     /// The arbitrator — must match wager.resolver
     pub resolver: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 pub fn handle_resolve_by_arbitrator(ctx: Context<ResolveByArbitrator>) -> Result<()> {
@@ -118,6 +157,8 @@ pub fn handle_resolve_by_arbitrator(ctx: Context<ResolveByArbitrator>) -> Result
         &ctx.accounts.escrow,
         &ctx.accounts.winner,
         &ctx.accounts.treasury,
+        &ctx.accounts.system_program.to_account_info(),
+        ctx.bumps.escrow,
     )
 }
 
@@ -168,6 +209,8 @@ pub struct ConsentResolve<'info> {
         constraint = treasury.key() == config.treasury,
     )]
     pub treasury: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 pub fn handle_consent_resolve(ctx: Context<ConsentResolve>) -> Result<()> {
@@ -212,6 +255,8 @@ pub fn handle_consent_resolve(ctx: Context<ConsentResolve>) -> Result<()> {
             &ctx.accounts.escrow,
             &ctx.accounts.winner,
             &ctx.accounts.treasury,
+            &ctx.accounts.system_program.to_account_info(),
+            ctx.bumps.escrow,
         )?;
     }
 
@@ -274,6 +319,8 @@ pub struct ResolveByOracle<'info> {
 
     /// Anyone can crank the oracle resolution once the condition is met
     pub crank: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 pub fn handle_resolve_by_oracle(ctx: Context<ResolveByOracle>) -> Result<()> {
@@ -330,6 +377,8 @@ pub fn handle_resolve_by_oracle(ctx: Context<ResolveByOracle>) -> Result<()> {
         &ctx.accounts.escrow,
         winner_account,
         &ctx.accounts.treasury,
+        &ctx.accounts.system_program.to_account_info(),
+        ctx.bumps.escrow,
     )
 }
 

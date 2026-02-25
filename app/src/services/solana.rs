@@ -182,6 +182,7 @@ impl SolanaService {
                 AccountMeta::new(*winner, false),
                 AccountMeta::new(*treasury, false),
                 AccountMeta::new_readonly(*resolver, true),
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
             ],
             data: anchor_discriminator("resolve_by_arbitrator"),
         }
@@ -219,6 +220,7 @@ impl SolanaService {
                 AccountMeta::new(wager, false),
                 AccountMeta::new(escrow, false),
                 AccountMeta::new(*initiator, true),
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
             ],
             data: anchor_discriminator("cancel_wager"),
         }
@@ -240,13 +242,14 @@ impl SolanaService {
         Instruction {
             program_id: self.program_id,
             accounts: vec![
-                // Must match: ConsentResolve { config, wager, escrow, participant, winner, treasury }
+                // Must match: ConsentResolve { config, wager, escrow, participant, winner, treasury, system_program }
                 AccountMeta::new_readonly(config, false),
                 AccountMeta::new(wager, false),
                 AccountMeta::new(escrow, false),
                 AccountMeta::new_readonly(*participant, true),
                 AccountMeta::new(*declared_winner, false),
                 AccountMeta::new(*treasury, false),
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
             ],
             data: anchor_discriminator("consent_resolve"),
         }

@@ -53,8 +53,9 @@ pub struct CreateWager<'info> {
     )]
     pub wager: Account<'info, Wager>,
 
-    /// Escrow PDA that holds both parties' stakes
-    /// CHECK: Validated by seeds; receives lamports directly
+    /// Escrow PDA that holds both parties' stakes.
+    /// System-owned; debits use invoke_signed with PDA seeds.
+    /// CHECK: Validated by seeds
     #[account(
         mut,
         seeds  = [b"escrow", wager.key().as_ref()],
@@ -235,6 +236,8 @@ pub struct CancelWager<'info> {
 
     #[account(mut)]
     pub initiator: Signer<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 pub fn handle_cancel_wager(ctx: Context<CancelWager>) -> Result<()> {
@@ -243,13 +246,29 @@ pub fn handle_cancel_wager(ctx: Context<CancelWager>) -> Result<()> {
 
     wager.status = WagerStatus::Cancelled;
 
-    // ── Refund initiator's stake from escrow ──────────────────────────────────
-    let escrow     = &ctx.accounts.escrow;
-    let initiator  = &ctx.accounts.initiator;
-    let refund_amt = escrow.lamports();
-
-    **escrow.try_borrow_mut_lamports()? -= refund_amt;
-    **initiator.try_borrow_mut_lamports()? += refund_amt;
+    // Refund initiator's stake from escrow using invoke_signed
+    let refund_amt = ctx.accounts.escrow.lamports();
+    if refund_amt > 0 {
+        let wager_key = wager.key();
+        let escrow_seeds: &[&[u8]] = &[
+            b"escrow",
+            wager_key.as_ref(),
+            &[ctx.bumps.escrow],
+        ];
+        anchor_lang::solana_program::program::invoke_signed(
+            &anchor_lang::solana_program::system_instruction::transfer(
+                &ctx.accounts.escrow.key(),
+                &ctx.accounts.initiator.key(),
+                refund_amt,
+            ),
+            &[
+                ctx.accounts.escrow.to_account_info(),
+                ctx.accounts.initiator.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+            &[escrow_seeds],
+        )?;
+    }
 
     msg!("Wager #{} cancelled. {} lamports refunded.", wager.wager_id, refund_amt);
     Ok(())
@@ -285,6 +304,8 @@ pub struct ExpireWager<'info> {
         constraint = initiator.key() == wager.initiator,
     )]
     pub initiator: UncheckedAccount<'info>,
+
+    pub system_program: Program<'info, System>,
 }
 
 pub fn handle_expire_wager(ctx: Context<ExpireWager>) -> Result<()> {
@@ -296,12 +317,28 @@ pub fn handle_expire_wager(ctx: Context<ExpireWager>) -> Result<()> {
 
     wager.status = WagerStatus::Expired;
 
-    let escrow     = &ctx.accounts.escrow;
-    let initiator  = &ctx.accounts.initiator;
-    let refund_amt = escrow.lamports();
-
-    **escrow.try_borrow_mut_lamports()? -= refund_amt;
-    **initiator.try_borrow_mut_lamports()? += refund_amt;
+    let refund_amt = ctx.accounts.escrow.lamports();
+    if refund_amt > 0 {
+        let wager_key = wager.key();
+        let escrow_seeds: &[&[u8]] = &[
+            b"escrow",
+            wager_key.as_ref(),
+            &[ctx.bumps.escrow],
+        ];
+        anchor_lang::solana_program::program::invoke_signed(
+            &anchor_lang::solana_program::system_instruction::transfer(
+                &ctx.accounts.escrow.key(),
+                &ctx.accounts.initiator.key(),
+                refund_amt,
+            ),
+            &[
+                ctx.accounts.escrow.to_account_info(),
+                ctx.accounts.initiator.to_account_info(),
+                ctx.accounts.system_program.to_account_info(),
+            ],
+            &[escrow_seeds],
+        )?;
+    }
 
     msg!("Wager #{} expired. {} lamports refunded.", wager.wager_id, refund_amt);
     Ok(())
