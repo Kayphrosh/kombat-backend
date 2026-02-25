@@ -563,7 +563,10 @@ pub async fn dispute_wager(
     })))
 }
 
-// ─── POST /wagers/:address/consent ────────────────────────────────────────────
+// ─── POST /wagers/:address/declare-winner ─────────────────────────────────────
+/// Routes to the correct on-chain instruction based on the wager's resolution_source:
+///   - "arbitrator" / "manual" → resolve_by_arbitrator (participant must be the resolver)
+///   - "mutualconsent" / "mutual" → consent_resolve (both participants must consent)
 
 pub async fn consent_wager(
     State(state): State<Arc<AppState>>,
@@ -585,13 +588,31 @@ pub async fn consent_wager(
     let treasury = state.solana.get_treasury().await
         .map_err(|e| internal_error(format!("Failed to read treasury: {}", e)))?;
 
-    let ix = state.solana.ix_consent_resolve(
-        &initiator,
-        wager.wager_id as u64,
-        &participant,
-        &declared_winner,
-        &treasury,
-    );
+    let resolution = wager.resolution_source.to_lowercase();
+
+    let (ix, desc) = if resolution == "mutualconsent" || resolution == "mutual_consent" || resolution == "mutual" {
+        // MutualConsent → consent_resolve (both participants must consent)
+        let ix = state.solana.ix_consent_resolve(
+            &initiator,
+            wager.wager_id as u64,
+            &participant,
+            &declared_winner,
+            &treasury,
+        );
+        let desc = format!("Consent resolve wager #{} — declared winner: {}", wager.wager_id, req.declared_winner);
+        (ix, desc)
+    } else {
+        // Arbitrator / manual → resolve_by_arbitrator (participant is the resolver/signer)
+        let ix = state.solana.ix_resolve_by_arbitrator(
+            &initiator,
+            wager.wager_id as u64,
+            &declared_winner,
+            &participant,  // participant acts as the resolver/signer
+            &treasury,
+        );
+        let desc = format!("Resolve wager #{} — winner: {}", wager.wager_id, req.declared_winner);
+        (ix, desc)
+    };
 
     let tx_b64 = state.solana
         .build_transaction(vec![ix], &participant)
@@ -600,6 +621,6 @@ pub async fn consent_wager(
 
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
-        description: format!("Consent resolve wager #{} — declared winner: {}", wager.wager_id, req.declared_winner),
+        description: desc,
     })))
 }
