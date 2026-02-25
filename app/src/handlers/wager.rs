@@ -55,10 +55,43 @@ fn internal_error(msg: impl Into<String>) -> (StatusCode, Json<ApiResponse<()>>)
 pub async fn list_wagers(
     State(state): State<Arc<AppState>>,
     Query(query): Query<WagerListQuery>,
-) -> AppResult<Vec<WagerRecord>> {
+) -> AppResult<Vec<crate::models::WagerDetailResponse>> {
     let wagers = state.db.list_wagers(&query).await
         .map_err(|e| internal_error(e.to_string()))?;
-    Ok(Json(ApiResponse::ok(wagers)))
+
+    // Enrich each wager with participant names/avatars
+    let mut enriched = Vec::with_capacity(wagers.len());
+    for wager in wagers {
+        let initiator_user = state.db.get_user(&wager.initiator).await.ok().flatten();
+        let (initiator_name, initiator_avatar) = match initiator_user {
+            Some(u) => (u.display_name, u.avatar_url),
+            None => (None, None),
+        };
+
+        let (challenger_name, challenger_avatar) = if let Some(ref ch) = wager.challenger {
+            match state.db.get_user(ch).await.ok().flatten() {
+                Some(u) => (u.display_name, u.avatar_url),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
+        let challenger_option = wager.initiator_option.as_ref().map(|opt| {
+            if opt.to_lowercase() == "yes" { "no".to_string() } else { "yes".to_string() }
+        });
+
+        enriched.push(crate::models::WagerDetailResponse {
+            wager,
+            initiator_name,
+            initiator_avatar,
+            challenger_name,
+            challenger_avatar,
+            challenger_option,
+        });
+    }
+
+    Ok(Json(ApiResponse::ok(enriched)))
 }
 
 // ─── GET /wagers/:address ─────────────────────────────────────────────────────
@@ -337,6 +370,47 @@ pub async fn cancel_wager(
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: format!("Cancel wager #{}", wager.wager_id),
+    })))
+}
+
+// ─── POST /wagers/:address/decline ───────────────────────────────────────────
+/// Decline a wager challenge — called by the challenged user.
+
+pub async fn decline_wager(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+    Json(req): Json<AcceptWagerRequest>, // reuses { challenger } field
+) -> AppResult<TxResponse> {
+    let wager = state.db.get_wager_by_address(&address).await
+        .map_err(|e| internal_error(e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(ApiResponse::err("Wager not found"))))?;
+
+    let challenger = Pubkey::from_str(&req.challenger)
+        .map_err(|_| bad_request("Invalid challenger pubkey"))?;
+
+    let initiator = Pubkey::from_str(&wager.initiator)
+        .map_err(|_| internal_error("Stored initiator pubkey invalid"))?;
+
+    // Build a cancel ix — the challenger declines
+    let ix = state.solana.ix_cancel_wager(&initiator, wager.wager_id as u64);
+
+    let tx_b64 = state.solana
+        .build_transaction(vec![ix], &challenger)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    // Mark as declined in DB immediately
+    let db = state.db.clone();
+    let addr = address.clone();
+    tokio::spawn(async move {
+        if let Err(e) = db.update_wager_status(&addr, "declined").await {
+            tracing::error!("Failed to update wager status to declined: {}", e);
+        }
+    });
+
+    Ok(Json(ApiResponse::ok(TxResponse {
+        transaction_b64: tx_b64,
+        description: format!("Decline wager #{}", wager.wager_id),
     })))
 }
 

@@ -93,10 +93,12 @@ impl DbService {
     }
 
     pub async fn mark_notification_read(&self, id: &str) -> Result<()> {
+        let uuid = uuid::Uuid::parse_str(id)
+            .map_err(|e| anyhow::anyhow!("Invalid notification ID: {}", e))?;
         sqlx::query(
             "UPDATE notifications SET is_read = TRUE WHERE id = $1"
         )
-        .bind(id)
+        .bind(uuid)
         .execute(&self.pool)
         .await?;
         Ok(())

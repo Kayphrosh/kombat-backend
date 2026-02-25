@@ -17,7 +17,7 @@ mod models;
 mod services;
 
 use handlers::wager::{
-    AppState, accept_wager, cancel_wager, create_wager,
+    AppState, accept_wager, cancel_wager, create_wager, decline_wager,
     dispute_wager, get_wager, list_wagers, resolve_wager, consent_wager,
 };
 use handlers::notifications::{list_notifications, mark_read as mark_notification_read, stream_notifications, ws_notifications};
@@ -158,7 +158,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/kombats/:address",          get(get_wager))
         .route("/api/kombats/:address/accept",   post(accept_wager))
         .route("/api/kombats/:address/cancel",   post(cancel_wager))
-        .route("/api/kombats/:address/decline",  post(cancel_wager))   // alias
+        .route("/api/kombats/:address/decline",  post(decline_wager))
         .route("/api/kombats/:address/resolve",  post(resolve_wager))
         .route("/api/kombats/:address/declare-winner", post(consent_wager))
         .route("/api/kombats/:address/dispute",  post(dispute_wager))
