@@ -145,6 +145,7 @@ impl IndexerService {
             oracle_target: Some(state.oracle_target),
             dispute_opened_at: if state.dispute_opened_at > 0 { Some(chrono::DateTime::from_timestamp(state.dispute_opened_at, 0).unwrap_or_default().into()) } else { None },
             dispute_opener: state.dispute_opener.map(|k| k.to_string()),
+            initiator_option: None, // Not stored on-chain, only in backend DB
         };
         
         self.db.upsert_wager(&record).await?;

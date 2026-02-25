@@ -66,11 +66,11 @@ pub async fn list_wagers(
 pub async fn get_wager(
     State(state): State<Arc<AppState>>,
     Path(address): Path<String>,
-) -> AppResult<WagerRecord> {
-    let wager = state.db.get_wager_by_address(&address).await
+) -> AppResult<crate::models::WagerDetailResponse> {
+    let detail = state.db.get_wager_with_users(&address).await
         .map_err(|e| internal_error(e.to_string()))?
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(ApiResponse::err("Wager not found"))))?;
-    Ok(Json(ApiResponse::ok(wager)))
+    Ok(Json(ApiResponse::ok(detail)))
 }
 
 // ─── Anchor Instruction Structs ────────────────────────────────────────────────
@@ -200,6 +200,7 @@ pub async fn create_wager(
         oracle_target: req.oracle_target,
         dispute_opened_at: None,
         dispute_opener: None,
+        initiator_option: req.initiator_option.clone(),
     };
 
     // Fire-and-forget DB insert + push notification

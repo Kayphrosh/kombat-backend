@@ -112,10 +112,10 @@ impl DbService {
                 stake_lamports, description, status, resolution_source,
                 resolver, expiry_ts, created_at, resolved_at, winner,
                 protocol_fee_bps, oracle_feed, oracle_target,
-                dispute_opened_at, dispute_opener
+                dispute_opened_at, dispute_opener, initiator_option
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
-                $11, $12, $13, $14, $15, $16, $17, $18, $19
+                $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
             )
             ON CONFLICT (on_chain_address) DO UPDATE SET
                 challenger       = EXCLUDED.challenger,
@@ -145,6 +145,7 @@ impl DbService {
         .bind(w.oracle_target)
         .bind(w.dispute_opened_at)
         .bind(&w.dispute_opener)
+        .bind(&w.initiator_option)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -157,13 +158,53 @@ impl DbService {
                 stake_lamports, description, status, resolution_source,
                 resolver, expiry_ts, created_at, resolved_at, winner,
                 protocol_fee_bps, oracle_feed, oracle_target,
-                dispute_opened_at, dispute_opener
+                dispute_opened_at, dispute_opener, initiator_option
               FROM wagers WHERE on_chain_address = $1"#,
         )
         .bind(address)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row)
+    }
+
+    /// Get a wager with participant user info (display names, avatars)
+    pub async fn get_wager_with_users(&self, address: &str) -> Result<Option<crate::models::WagerDetailResponse>> {
+        let wager = self.get_wager_by_address(address).await?;
+        let wager = match wager {
+            Some(w) => w,
+            None => return Ok(None),
+        };
+
+        // Look up initiator user info
+        let initiator_user = self.get_user(&wager.initiator).await?;
+        let (initiator_name, initiator_avatar) = match initiator_user {
+            Some(u) => (u.display_name, u.avatar_url),
+            None => (None, None),
+        };
+
+        // Look up challenger user info (if present)
+        let (challenger_name, challenger_avatar) = if let Some(ref ch) = wager.challenger {
+            match self.get_user(ch).await? {
+                Some(u) => (u.display_name, u.avatar_url),
+                None => (None, None),
+            }
+        } else {
+            (None, None)
+        };
+
+        // Compute challenger option (opposite of initiator)
+        let challenger_option = wager.initiator_option.as_ref().map(|opt| {
+            if opt.to_lowercase() == "yes" { "no".to_string() } else { "yes".to_string() }
+        });
+
+        Ok(Some(crate::models::WagerDetailResponse {
+            wager,
+            initiator_name,
+            initiator_avatar,
+            challenger_name,
+            challenger_avatar,
+            challenger_option,
+        }))
     }
 
     pub async fn list_wagers(&self, q: &WagerListQuery) -> Result<Vec<WagerRecord>> {
@@ -175,7 +216,7 @@ impl DbService {
                stake_lamports, description, status, resolution_source,
                resolver, expiry_ts, created_at, resolved_at, winner,
                protocol_fee_bps, oracle_feed, oracle_target,
-               dispute_opened_at, dispute_opener
+               dispute_opened_at, dispute_opener, initiator_option
                FROM wagers WHERE 1=1"#,
         );
 

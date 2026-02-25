@@ -15,6 +15,7 @@ pub struct CreateWagerRequest {
     pub resolution_source: String,
     pub resolver: String,
     pub challenger_address: Option<String>,
+    pub initiator_option: Option<String>,
     pub oracle_feed: Option<String>,
     pub oracle_target: Option<i64>,
     pub oracle_initiator_wins_above: Option<bool>,
@@ -70,6 +71,18 @@ pub struct WagerRecord {
     pub oracle_target: Option<i64>,
     pub dispute_opened_at: Option<DateTime<Utc>>,
     pub dispute_opener: Option<String>,
+    pub initiator_option: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct WagerDetailResponse {
+    #[serde(flatten)]
+    pub wager: WagerRecord,
+    pub initiator_name: Option<String>,
+    pub initiator_avatar: Option<String>,
+    pub challenger_name: Option<String>,
+    pub challenger_avatar: Option<String>,
+    pub challenger_option: Option<String>,
 }
 
 // ─── User Profile ─────────────────────────────────────────────────────────────
