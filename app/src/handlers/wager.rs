@@ -431,8 +431,9 @@ pub async fn resolve_wager(
         .map_err(|_| bad_request("Invalid winner pubkey"))?;
     let resolver = Pubkey::from_str(&req.caller)
         .map_err(|_| bad_request("Invalid caller pubkey"))?;
-    // In production, look up treasury from config PDA
-    let treasury = resolver;
+    // Read the treasury from on-chain ProtocolConfig
+    let treasury = state.solana.get_treasury().await
+        .map_err(|e| internal_error(format!("Failed to read treasury: {}", e)))?;
 
     let ix = state.solana.ix_resolve_by_arbitrator(
         &initiator,
@@ -580,11 +581,16 @@ pub async fn consent_wager(
     let declared_winner = Pubkey::from_str(&req.declared_winner)
         .map_err(|_| bad_request("Invalid declared_winner pubkey"))?;
 
+    // Read the treasury from on-chain ProtocolConfig
+    let treasury = state.solana.get_treasury().await
+        .map_err(|e| internal_error(format!("Failed to read treasury: {}", e)))?;
+
     let ix = state.solana.ix_consent_resolve(
         &initiator,
         wager.wager_id as u64,
         &participant,
         &declared_winner,
+        &treasury,
     );
 
     let tx_b64 = state.solana

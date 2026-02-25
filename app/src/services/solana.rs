@@ -230,7 +230,8 @@ impl SolanaService {
         initiator: &Pubkey,
         wager_id: u64,
         participant: &Pubkey,
-        _declared_winner: &Pubkey,
+        declared_winner: &Pubkey,
+        treasury: &Pubkey,
     ) -> Instruction {
         let (config, _) = self.config_pda();
         let (wager, _)  = self.wager_pda(initiator, wager_id);
@@ -239,13 +240,32 @@ impl SolanaService {
         Instruction {
             program_id: self.program_id,
             accounts: vec![
+                // Must match: ConsentResolve { config, wager, escrow, participant, winner, treasury }
                 AccountMeta::new_readonly(config, false),
                 AccountMeta::new(wager, false),
                 AccountMeta::new(escrow, false),
                 AccountMeta::new_readonly(*participant, true),
+                AccountMeta::new(*declared_winner, false),
+                AccountMeta::new(*treasury, false),
             ],
             data: anchor_discriminator("consent_resolve"),
         }
+    }
+
+    /// Read the treasury pubkey from the on-chain ProtocolConfig PDA.
+    /// Layout: 8 (discriminator) + 1 (bump) + 32 (admin) + 32 (treasury)
+    pub async fn get_treasury(&self) -> Result<Pubkey> {
+        let (config_pda, _) = self.config_pda();
+        let account = self.rpc.get_account(&config_pda).await
+            .context("Failed to read ProtocolConfig account")?;
+        let data = &account.data;
+        // 8 (disc) + 1 (bump) + 32 (admin) = offset 41, then 32 bytes of treasury
+        if data.len() < 73 {
+            anyhow::bail!("ProtocolConfig account data too short");
+        }
+        let treasury_bytes: [u8; 32] = data[41..73].try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse treasury pubkey"))?;
+        Ok(Pubkey::new_from_array(treasury_bytes))
     }
 }
 
