@@ -26,21 +26,70 @@ pub struct DynamicCredential {
     pub chain: Option<String>,
     pub format: Option<String>,
     pub email: Option<String>,
+    pub wallet_name: Option<String>,
+    pub public_key: Option<String>,
+}
+
+/// Check if a string looks like a valid Solana base58 address (32-44 alphanumeric chars).
+fn is_solana_address(s: &str) -> bool {
+    let len = s.len();
+    (32..=44).contains(&len) && s.chars().all(|c| c.is_alphanumeric())
 }
 
 impl DynamicClaims {
-    /// Extract the primary wallet address from the token.
+    /// Extract the primary Solana wallet address from the token.
+    /// Prioritises credentials marked with chain="solana", then any blockchain
+    /// credential with a valid-looking base58 address. Never falls back to the
+    /// Dynamic user UUID (`sub`).
     pub fn wallet_address(&self) -> Option<String> {
-        // First check verified_credentials for a wallet
         if let Some(creds) = &self.verified_credentials {
+            // 1. Prefer a credential explicitly tagged as Solana
+            for cred in creds {
+                if let Some(chain) = &cred.chain {
+                    let chain_lower = chain.to_lowercase();
+                    if (chain_lower == "solana" || chain_lower == "sol") {
+                        // Try address first, then public_key
+                        if let Some(addr) = &cred.address {
+                            if is_solana_address(addr) {
+                                return Some(addr.clone());
+                            }
+                        }
+                        if let Some(pk) = &cred.public_key {
+                            if is_solana_address(pk) {
+                                return Some(pk.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Fall back to any blockchain credential with a valid base58 address
+            for cred in creds {
+                let is_blockchain = cred.format.as_deref() == Some("blockchain");
+                if let Some(addr) = &cred.address {
+                    if is_blockchain && is_solana_address(addr) {
+                        return Some(addr.clone());
+                    }
+                }
+            }
+
+            // 3. Last resort: any credential with a valid-looking Solana address
             for cred in creds {
                 if let Some(addr) = &cred.address {
-                    return Some(addr.clone());
+                    if is_solana_address(addr) {
+                        return Some(addr.clone());
+                    }
                 }
             }
         }
-        // Fall back to sub claim
-        self.sub.clone()
+
+        // Log for debugging — do NOT fall back to sub (it's a UUID, not a wallet)
+        tracing::warn!(
+            "No Solana wallet address found in Dynamic token. sub={:?}, creds={:?}",
+            self.sub,
+            self.verified_credentials
+        );
+        None
     }
 
     /// Extract the email from the token.
