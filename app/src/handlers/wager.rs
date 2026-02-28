@@ -535,8 +535,10 @@ pub async fn dispute_wager(
         .await
         .map_err(|e| internal_error(e.to_string()))?;
 
-    // Notify the other participant about the dispute (if present)
+    // Fire-and-forget: save opener's dispute submission + notify other party
     let opener = req.opener.clone();
+    let description = req.description.clone();
+    let evidence_url = req.evidence_url.clone();
     let db = state.db.clone();
     let addr_clone = address.clone();
     let maybe_other = if opener == wager.initiator {
@@ -545,11 +547,25 @@ pub async fn dispute_wager(
         Some(wager.initiator.clone())
     };
 
-    if let Some(other_wallet) = maybe_other {
-        let payload = serde_json::json!({ "wager_address": addr_clone, "opener": opener });
-        let notif_tx = state.notif_tx.clone();
-        let redis_client = state.redis_client.clone();
-        tokio::spawn(async move {
+    let notif_tx = state.notif_tx.clone();
+    let redis_client = state.redis_client.clone();
+    tokio::spawn(async move {
+        // Save the opener's dispute submission if they provided a description
+        if let Some(desc) = &description {
+            if let Err(e) = db.upsert_dispute_submission(
+                &addr_clone,
+                &opener,
+                desc,
+                evidence_url.as_deref(),
+                None, // declared_winner not set at open time
+            ).await {
+                tracing::error!("failed to save opener dispute submission: {}", e);
+            }
+        }
+
+        // Notify the other participant about the dispute
+        if let Some(other_wallet) = maybe_other {
+            let payload = serde_json::json!({ "wager_address": addr_clone, "opener": opener });
             if let Err(e) = db.create_notification(&other_wallet, "wager_disputed", Some(payload.clone())).await {
                 tracing::error!("failed to create dispute notification: {}", e);
             }
@@ -560,13 +576,66 @@ pub async fn dispute_wager(
                     let _ : Result<i64, _> = conn.publish("notifications", msg).await;
                 }
             }
-        });
-    }
+        }
+    });
 
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: format!("Open dispute on wager #{}", wager.wager_id),
     })))
+}
+
+// ─── POST /wagers/:address/dispute/submit ─────────────────────────────────────
+/// Submit or update a dispute form (description, evidence, declared winner).
+/// Both participants should call this endpoint.
+
+pub async fn submit_dispute_form(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+    Json(req): Json<DisputeSubmissionRequest>,
+) -> AppResult<crate::models::DisputeSubmissionRecord> {
+    // Verify wager exists and is in disputed state
+    let wager = state.db.get_wager_by_address(&address).await
+        .map_err(|e| internal_error(e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(ApiResponse::err("Wager not found"))))?;
+
+    if wager.status != "disputed" {
+        return Err(bad_request("Wager is not in disputed state"));
+    }
+
+    // Verify submitter is a participant
+    let is_participant = req.submitter == wager.initiator
+        || wager.challenger.as_deref() == Some(&req.submitter);
+    if !is_participant {
+        return Err(bad_request("Only wager participants can submit dispute forms"));
+    }
+
+    let record = state.db.upsert_dispute_submission(
+        &address,
+        &req.submitter,
+        &req.description,
+        req.evidence_url.as_deref(),
+        req.declared_winner.as_deref(),
+    ).await.map_err(|e| internal_error(e.to_string()))?;
+
+    Ok(Json(ApiResponse::ok(record)))
+}
+
+// ─── GET /wagers/:address/dispute ─────────────────────────────────────────────
+/// Fetch both parties' dispute submissions for a wager.
+
+pub async fn get_dispute_submissions(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> AppResult<Vec<crate::models::DisputeSubmissionRecord>> {
+    let _wager = state.db.get_wager_by_address(&address).await
+        .map_err(|e| internal_error(e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(ApiResponse::err("Wager not found"))))?;
+
+    let submissions = state.db.get_dispute_submissions(&address).await
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    Ok(Json(ApiResponse::ok(submissions)))
 }
 
 // ─── POST /wagers/:address/declare-winner ─────────────────────────────────────

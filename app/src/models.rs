@@ -46,6 +46,28 @@ pub struct ConsentRequest {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DisputeRequest {
     pub opener: String,
+    pub description: Option<String>,
+    pub evidence_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DisputeSubmissionRequest {
+    pub submitter: String,
+    pub description: String,
+    pub evidence_url: Option<String>,
+    pub declared_winner: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct DisputeSubmissionRecord {
+    pub id: uuid::Uuid,
+    pub wager_address: String,
+    pub submitter: String,
+    pub description: String,
+    pub evidence_url: Option<String>,
+    pub declared_winner: Option<String>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
 // ─── Wager Record ─────────────────────────────────────────────────────────────

@@ -19,6 +19,7 @@ mod services;
 use handlers::wager::{
     AppState, accept_wager, cancel_wager, create_wager, decline_wager,
     dispute_wager, get_wager, list_wagers, resolve_wager, consent_wager,
+    submit_dispute_form, get_dispute_submissions,
 };
 use handlers::notifications::{list_notifications, mark_read as mark_notification_read, stream_notifications, ws_notifications};
 use handlers::auth::mint_token;
@@ -150,7 +151,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/wagers/:address/accept",   post(accept_wager))
         .route("/wagers/:address/cancel",   post(cancel_wager))
         .route("/wagers/:address/resolve",  post(resolve_wager))
-        .route("/wagers/:address/dispute",  post(dispute_wager))
+        .route("/wagers/:address/dispute",  post(dispute_wager).get(get_dispute_submissions))
+        .route("/wagers/:address/dispute/submit", post(submit_dispute_form))
         .route("/wagers/:address/consent",  post(consent_wager))
 
         // ── /api/kombats aliases (same handlers) ─────────────────────────────
@@ -161,7 +163,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/kombats/:address/decline",  post(decline_wager))
         .route("/api/kombats/:address/resolve",  post(resolve_wager))
         .route("/api/kombats/:address/declare-winner", post(consent_wager))
-        .route("/api/kombats/:address/dispute",  post(dispute_wager))
+        .route("/api/kombats/:address/dispute",  post(dispute_wager).get(get_dispute_submissions))
+        .route("/api/kombats/:address/dispute/submit", post(submit_dispute_form))
         .route("/api/kombats/:address/consent",  post(consent_wager))
 
         // ── User profile routes ──────────────────────────────────────────────

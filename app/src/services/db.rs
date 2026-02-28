@@ -304,6 +304,17 @@ impl DbService {
                 .bind(address)
                 .execute(&self.pool)
                 .await?;
+
+                // Update win/loss stats for both participants
+                if let Some(wager) = self.get_wager_by_address(address).await? {
+                    let loser = if wager.initiator == creator_pick {
+                        wager.challenger.as_deref()
+                    } else {
+                        Some(wager.initiator.as_str())
+                    };
+                    self.record_wager_result(&creator_pick, loser).await?;
+                }
+
                 return Ok(Some(creator_pick));
             }
         }
@@ -371,6 +382,81 @@ impl DbService {
             .execute(&self.pool)
             .await?;
         Ok(())
+    }
+
+    // ── Win/Loss Recording ───────────────────────────────────────────────
+
+    /// Increment the winner's `wins` and the loser's `losses` in the users table.
+    /// If either wallet does not have a user row yet the update is silently skipped
+    /// (the user simply hasn't created a profile).
+    pub async fn record_wager_result(&self, winner_wallet: &str, loser_wallet: Option<&str>) -> Result<()> {
+        sqlx::query(
+            "UPDATE users SET wins = wins + 1, updated_at = NOW() WHERE wallet_address = $1"
+        )
+        .bind(winner_wallet)
+        .execute(&self.pool)
+        .await?;
+
+        if let Some(loser) = loser_wallet {
+            sqlx::query(
+                "UPDATE users SET losses = losses + 1, updated_at = NOW() WHERE wallet_address = $1"
+            )
+            .bind(loser)
+            .execute(&self.pool)
+            .await?;
+        }
+
+        tracing::info!("Recorded wager result — winner: {}, loser: {:?}", winner_wallet, loser_wallet);
+        Ok(())
+    }
+
+    // ── Dispute Submissions ──────────────────────────────────────────────────
+
+    /// Insert or update a dispute submission for a participant.
+    /// Each (wager_address, submitter) pair can have exactly one submission.
+    pub async fn upsert_dispute_submission(
+        &self,
+        wager_address: &str,
+        submitter: &str,
+        description: &str,
+        evidence_url: Option<&str>,
+        declared_winner: Option<&str>,
+    ) -> Result<crate::models::DisputeSubmissionRecord> {
+        let row = sqlx::query_as::<_, crate::models::DisputeSubmissionRecord>(
+            r#"INSERT INTO dispute_submissions (wager_address, submitter, description, evidence_url, declared_winner)
+               VALUES ($1, $2, $3, $4, $5)
+               ON CONFLICT (wager_address, submitter) DO UPDATE SET
+                   description     = EXCLUDED.description,
+                   evidence_url    = EXCLUDED.evidence_url,
+                   declared_winner = EXCLUDED.declared_winner,
+                   updated_at      = NOW()
+               RETURNING id, wager_address, submitter, description, evidence_url, declared_winner, created_at, updated_at"#,
+        )
+        .bind(wager_address)
+        .bind(submitter)
+        .bind(description)
+        .bind(evidence_url)
+        .bind(declared_winner)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Fetch all dispute submissions for a wager (up to 2 — one per participant).
+    pub async fn get_dispute_submissions(
+        &self,
+        wager_address: &str,
+    ) -> Result<Vec<crate::models::DisputeSubmissionRecord>> {
+        let rows = sqlx::query_as::<_, crate::models::DisputeSubmissionRecord>(
+            r#"SELECT id, wager_address, submitter, description, evidence_url, declared_winner, created_at, updated_at
+               FROM dispute_submissions
+               WHERE wager_address = $1
+               ORDER BY created_at ASC"#,
+        )
+        .bind(wager_address)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
     }
 
     // ── User Stats ──────────────────────────────────────────────────────────

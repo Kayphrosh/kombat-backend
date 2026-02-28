@@ -125,21 +125,29 @@ impl IndexerService {
         let mut data_slice = &account.data[8..];
         let state: WagerAccount = BorshDeserialize::deserialize(&mut data_slice)?;
 
+        let on_chain_address = wager_pk.to_string();
+        let new_status = format!("{:?}", state.status).to_lowercase();
+        let winner_wallet = state.winner.map(|k| k.to_string());
+
+        // Check existing DB record to avoid double-counting wins/losses
+        let existing = self.db.get_wager_by_address(&on_chain_address).await?;
+        let was_already_resolved = existing.as_ref().map_or(false, |w| w.status == "resolved");
+
         let record = crate::models::WagerRecord {
             id: uuid::Uuid::new_v4(),
-            on_chain_address: wager_pk.to_string(),
+            on_chain_address: on_chain_address.clone(),
             wager_id: state.wager_id as i64,
             initiator: state.initiator.to_string(),
             challenger: state.challenger.map(|k| k.to_string()),
             stake_lamports: state.stake_lamports as i64,
             description: state.description.clone(),
-            status: format!("{:?}", state.status).to_lowercase(),
+            status: new_status.clone(),
             resolution_source: format!("{:?}", state.resolution_source).to_lowercase(),
             resolver: state.resolver.to_string(),
             expiry_ts: state.expiry_ts,
             created_at: chrono::DateTime::from_timestamp(state.created_at, 0).unwrap_or_default().into(),
             resolved_at: if state.resolved_at > 0 { Some(chrono::DateTime::from_timestamp(state.resolved_at, 0).unwrap_or_default().into()) } else { None },
-            winner: state.winner.map(|k| k.to_string()),
+            winner: winner_wallet.clone(),
             protocol_fee_bps: state.protocol_fee_bps as i16,
             oracle_feed: state.oracle_feed.map(|k| k.to_string()),
             oracle_target: Some(state.oracle_target),
@@ -151,7 +159,22 @@ impl IndexerService {
         };
         
         self.db.upsert_wager(&record).await?;
-        tracing::info!("Upserted wager #{} ({:?})", state.wager_id, state.status); 
+        tracing::info!("Upserted wager #{} ({:?})", state.wager_id, state.status);
+
+        // If the wager just became resolved (wasn't already), update user win/loss stats
+        if new_status == "resolved" && !was_already_resolved {
+            if let Some(ref winner) = winner_wallet {
+                let initiator = state.initiator.to_string();
+                let challenger = state.challenger.map(|k| k.to_string());
+                let loser = if *winner == initiator {
+                    challenger.as_deref()
+                } else {
+                    Some(initiator.as_str())
+                };
+                self.db.record_wager_result(winner, loser).await?;
+            }
+        }
+
         Ok(())
     }
 }
