@@ -14,10 +14,20 @@ const { PublicKey, SystemProgram } = require("@solana/web3.js");
 const fs = require("fs");
 const path = require("path");
 
+// USDC Mint addresses (6 decimals)
+// For devnet/testnet, use the Circle devnet USDC or a custom test mint
+// For mainnet: EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v
+const DEVNET_USDC_MINT = new PublicKey("4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU");
+const MAINNET_USDC_MINT = new PublicKey("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v");
+
 async function main() {
   // --- Provider ---
+  const rpcUrl = process.env.SOLANA_RPC_URL || "https://api.devnet.solana.com";
+  const isMainnet = rpcUrl.includes("mainnet");
+  const usdcMint = isMainnet ? MAINNET_USDC_MINT : DEVNET_USDC_MINT;
+  
   const connection = new anchor.web3.Connection(
-    "https://api.devnet.solana.com",
+    rpcUrl,
     "confirmed"
   );
 
@@ -56,6 +66,8 @@ async function main() {
 
   console.log("Admin:      ", admin.publicKey.toBase58());
   console.log("Config PDA: ", configPda.toBase58());
+  console.log("USDC Mint:  ", usdcMint.toBase58());
+  console.log("Network:    ", isMainnet ? "mainnet" : "devnet");
 
   // --- Check if already initialized ---
   const configAccount = await connection.getAccountInfo(configPda);
@@ -77,6 +89,7 @@ async function main() {
       .accounts({
         config: configPda,
         treasury: treasury,
+        usdcMint: usdcMint,
         admin: admin.publicKey,
         systemProgram: SystemProgram.programId,
       })

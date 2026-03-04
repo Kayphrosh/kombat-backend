@@ -111,7 +111,7 @@ impl DbService {
             r#"
             INSERT INTO wagers (
                 id, on_chain_address, wager_id, initiator, challenger,
-                stake_lamports, description, status, resolution_source,
+                stake_usdc, description, status, resolution_source,
                 resolver, expiry_ts, created_at, resolved_at, winner,
                 protocol_fee_bps, oracle_feed, oracle_target,
                 dispute_opened_at, dispute_opener, initiator_option,
@@ -135,7 +135,7 @@ impl DbService {
         .bind(w.wager_id)
         .bind(&w.initiator)
         .bind(&w.challenger)
-        .bind(w.stake_lamports)
+        .bind(w.stake_usdc)
         .bind(&w.description)
         .bind(&w.status)
         .bind(&w.resolution_source)
@@ -161,7 +161,7 @@ impl DbService {
         let row = sqlx::query_as::<_, WagerRecord>(
             r#"SELECT
                 id, on_chain_address, wager_id, initiator, challenger,
-                stake_lamports, description, status, resolution_source,
+                stake_usdc, description, status, resolution_source,
                 resolver, expiry_ts, created_at, resolved_at, winner,
                 protocol_fee_bps, oracle_feed, oracle_target,
                 dispute_opened_at, dispute_opener, initiator_option,
@@ -220,7 +220,7 @@ impl DbService {
 
         let mut qb = sqlx::QueryBuilder::new(
             r#"SELECT id, on_chain_address, wager_id, initiator, challenger,
-               stake_lamports, description, status, resolution_source,
+               stake_usdc, description, status, resolution_source,
                resolver, expiry_ts, created_at, resolved_at, winner,
                protocol_fee_bps, oracle_feed, oracle_target,
                dispute_opened_at, dispute_opener, initiator_option,
@@ -477,14 +477,14 @@ impl DbService {
         .await?;
 
         let total_stake: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(stake_lamports), 0)::BIGINT FROM wagers WHERE (initiator = $1 OR challenger = $1)"
+            "SELECT COALESCE(SUM(stake_usdc), 0)::BIGINT FROM wagers WHERE (initiator = $1 OR challenger = $1)"
         )
         .bind(wallet)
         .fetch_one(&self.pool)
         .await?;
 
         let total_won: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(stake_lamports * 2), 0)::BIGINT FROM wagers WHERE status = 'resolved' AND winner = $1"
+            "SELECT COALESCE(SUM(stake_usdc * 2), 0)::BIGINT FROM wagers WHERE status = 'resolved' AND winner = $1"
         )
         .bind(wallet)
         .fetch_one(&self.pool)

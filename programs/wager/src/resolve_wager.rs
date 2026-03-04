@@ -1,20 +1,19 @@
 // programs/wager/src/resolve_wager.rs
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program;
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use crate::{state::*, errors::WagerError};
 
 // ─── Shared payout helper ─────────────────────────────────────────────────────
-/// Uses invoke_signed with the escrow PDA seeds to transfer SOL out.
+/// Uses PDA-signed SPL token transfer to move USDC from escrow to winner and treasury.
 
 fn payout_winner<'info>(
     wager: &Account<'info, Wager>,
-    escrow: &UncheckedAccount<'info>,
-    winner_account: &UncheckedAccount<'info>,
-    treasury: &UncheckedAccount<'info>,
-    system_program: &AccountInfo<'info>,
-    escrow_bump: u8,
+    escrow_token_account: &Account<'info, TokenAccount>,
+    winner_token_account: &Account<'info, TokenAccount>,
+    treasury_token_account: &Account<'info, TokenAccount>,
+    token_program: &Program<'info, Token>,
 ) -> Result<()> {
-    let total_pot  = escrow.lamports();
+    let total_pot = escrow_token_account.amount;
     let fee_amount = (total_pot as u128)
         .checked_mul(wager.protocol_fee_bps as u128)
         .ok_or(WagerError::Overflow)?
@@ -25,49 +24,51 @@ fn payout_winner<'info>(
         .checked_sub(fee_amount)
         .ok_or(WagerError::Overflow)?;
 
-    let wager_key = wager.key();
-    let escrow_seeds: &[&[u8]] = &[
-        b"escrow",
-        wager_key.as_ref(),
-        &[escrow_bump],
+    // Build PDA signer seeds for the wager account (which owns the escrow ATA)
+    let initiator_key = wager.initiator;
+    let wager_id_bytes = wager.wager_id.to_le_bytes();
+    let bump = wager.bump;
+    let seeds: &[&[u8]] = &[
+        b"wager",
+        initiator_key.as_ref(),
+        wager_id_bytes.as_ref(),
+        &[bump],
     ];
 
     // Transfer winner's payout
     if winner_payout > 0 {
-        solana_program::program::invoke_signed(
-            &solana_program::system_instruction::transfer(
-                &escrow.key(),
-                &winner_account.key(),
-                winner_payout,
+        token::transfer(
+            CpiContext::new_with_signer(
+                token_program.to_account_info(),
+                Transfer {
+                    from: escrow_token_account.to_account_info(),
+                    to: winner_token_account.to_account_info(),
+                    authority: wager.to_account_info(),
+                },
+                &[seeds],
             ),
-            &[
-                escrow.to_account_info(),
-                winner_account.to_account_info(),
-                system_program.clone(),
-            ],
-            &[escrow_seeds],
+            winner_payout,
         )?;
     }
 
     // Transfer protocol fee to treasury
     if fee_amount > 0 {
-        solana_program::program::invoke_signed(
-            &solana_program::system_instruction::transfer(
-                &escrow.key(),
-                &treasury.key(),
-                fee_amount,
+        token::transfer(
+            CpiContext::new_with_signer(
+                token_program.to_account_info(),
+                Transfer {
+                    from: escrow_token_account.to_account_info(),
+                    to: treasury_token_account.to_account_info(),
+                    authority: wager.to_account_info(),
+                },
+                &[seeds],
             ),
-            &[
-                escrow.to_account_info(),
-                treasury.to_account_info(),
-                system_program.clone(),
-            ],
-            &[escrow_seeds],
+            fee_amount,
         )?;
     }
 
     msg!(
-        "Payout: {} lamports to winner, {} lamports fee to treasury",
+        "Payout: {} micro-USDC to winner, {} micro-USDC fee to treasury",
         winner_payout,
         fee_amount
     );
@@ -99,35 +100,43 @@ pub struct ResolveByArbitrator<'info> {
     )]
     pub wager: Account<'info, Wager>,
 
-    /// CHECK: Validated by seeds
+    /// USDC mint account
+    #[account(
+        constraint = usdc_mint.key() == config.usdc_mint @ WagerError::InvalidUsdcMint
+    )]
+    pub usdc_mint: Account<'info, token::Mint>,
+
+    /// Escrow token account (PDA-owned ATA) that holds USDC stakes
     #[account(
         mut,
-        seeds = [b"escrow", wager.key().as_ref()],
-        bump,
+        associated_token::mint = usdc_mint,
+        associated_token::authority = wager,
     )]
-    pub escrow: UncheckedAccount<'info>,
+    pub escrow_token_account: Account<'info, TokenAccount>,
 
-    /// The declared winner — must be initiator or challenger
-    /// CHECK: Validated in handler logic
-    #[account(mut)]
-    pub winner: UncheckedAccount<'info>,
-
-    /// CHECK: Treasury from protocol config
+    /// The declared winner's USDC token account
     #[account(
         mut,
-        constraint = treasury.key() == config.treasury,
+        constraint = winner_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
     )]
-    pub treasury: UncheckedAccount<'info>,
+    pub winner_token_account: Account<'info, TokenAccount>,
+
+    /// Treasury's USDC token account for protocol fees
+    #[account(
+        mut,
+        constraint = treasury_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
+    )]
+    pub treasury_token_account: Account<'info, TokenAccount>,
 
     /// The arbitrator — must match wager.resolver
     pub resolver: Signer<'info>,
 
-    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
 }
 
 pub fn handle_resolve_by_arbitrator(ctx: Context<ResolveByArbitrator>) -> Result<()> {
-    let wager   = &mut ctx.accounts.wager;
-    let winner_key = ctx.accounts.winner.key();
+    let wager = &mut ctx.accounts.wager;
+    let winner_key = ctx.accounts.winner_token_account.owner;
 
     // ── Lifecycle guard ────────────────────────────────────────────────────────
     require!(
@@ -154,11 +163,10 @@ pub fn handle_resolve_by_arbitrator(ctx: Context<ResolveByArbitrator>) -> Result
 
     payout_winner(
         wager,
-        &ctx.accounts.escrow,
-        &ctx.accounts.winner,
-        &ctx.accounts.treasury,
-        &ctx.accounts.system_program.to_account_info(),
-        ctx.bumps.escrow,
+        &ctx.accounts.escrow_token_account,
+        &ctx.accounts.winner_token_account,
+        &ctx.accounts.treasury_token_account,
+        &ctx.accounts.token_program,
     )
 }
 
@@ -187,36 +195,44 @@ pub struct ConsentResolve<'info> {
     )]
     pub wager: Account<'info, Wager>,
 
-    /// CHECK: Validated by seeds
+    /// USDC mint account
+    #[account(
+        constraint = usdc_mint.key() == config.usdc_mint @ WagerError::InvalidUsdcMint
+    )]
+    pub usdc_mint: Account<'info, token::Mint>,
+
+    /// Escrow token account (PDA-owned ATA) that holds USDC stakes
     #[account(
         mut,
-        seeds = [b"escrow", wager.key().as_ref()],
-        bump,
+        associated_token::mint = usdc_mint,
+        associated_token::authority = wager,
     )]
-    pub escrow: UncheckedAccount<'info>,
+    pub escrow_token_account: Account<'info, TokenAccount>,
 
     /// The participant giving consent
     pub participant: Signer<'info>,
 
-    /// The declared winner — caller submits who they think won
-    /// CHECK: Validated in handler
-    #[account(mut)]
-    pub winner: UncheckedAccount<'info>,
-
-    /// CHECK: Treasury from protocol config
+    /// The declared winner's USDC token account
     #[account(
         mut,
-        constraint = treasury.key() == config.treasury,
+        constraint = winner_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
     )]
-    pub treasury: UncheckedAccount<'info>,
+    pub winner_token_account: Account<'info, TokenAccount>,
 
-    pub system_program: Program<'info, System>,
+    /// Treasury's USDC token account for protocol fees
+    #[account(
+        mut,
+        constraint = treasury_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
+    )]
+    pub treasury_token_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
 }
 
 pub fn handle_consent_resolve(ctx: Context<ConsentResolve>) -> Result<()> {
     let wager       = &mut ctx.accounts.wager;
     let participant = ctx.accounts.participant.key();
-    let winner_key  = ctx.accounts.winner.key();
+    let winner_key  = ctx.accounts.winner_token_account.owner;
 
     require!(wager.status == WagerStatus::Active, WagerError::NotActive);
 
@@ -252,11 +268,10 @@ pub fn handle_consent_resolve(ctx: Context<ConsentResolve>) -> Result<()> {
 
         payout_winner(
             wager,
-            &ctx.accounts.escrow,
-            &ctx.accounts.winner,
-            &ctx.accounts.treasury,
-            &ctx.accounts.system_program.to_account_info(),
-            ctx.bumps.escrow,
+            &ctx.accounts.escrow_token_account,
+            &ctx.accounts.winner_token_account,
+            &ctx.accounts.treasury_token_account,
+            &ctx.accounts.token_program,
         )?;
     }
 
@@ -288,39 +303,50 @@ pub struct ResolveByOracle<'info> {
     )]
     pub wager: Account<'info, Wager>,
 
-    /// CHECK: Validated by seeds
+    /// USDC mint account
+    #[account(
+        constraint = usdc_mint.key() == config.usdc_mint @ WagerError::InvalidUsdcMint
+    )]
+    pub usdc_mint: Account<'info, token::Mint>,
+
+    /// Escrow token account (PDA-owned ATA) that holds USDC stakes
     #[account(
         mut,
-        seeds = [b"escrow", wager.key().as_ref()],
-        bump,
+        associated_token::mint = usdc_mint,
+        associated_token::authority = wager,
     )]
-    pub escrow: UncheckedAccount<'info>,
+    pub escrow_token_account: Account<'info, TokenAccount>,
 
     /// The oracle price/result feed (Switchboard or Pyth aggregator)
     /// CHECK: Validated against wager.oracle_feed
     pub oracle_feed: UncheckedAccount<'info>,
 
-    /// Initiator's account for possible payout
-    /// CHECK: Matched against wager.initiator in handler
-    #[account(mut)]
-    pub initiator: UncheckedAccount<'info>,
-
-    /// Challenger's account for possible payout
-    /// CHECK: Matched against wager.challenger in handler
-    #[account(mut)]
-    pub challenger: UncheckedAccount<'info>,
-
-    /// CHECK: Treasury from protocol config
+    /// Initiator's USDC token account for possible payout
     #[account(
         mut,
-        constraint = treasury.key() == config.treasury,
+        constraint = initiator_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
+        constraint = initiator_token_account.owner == wager.initiator @ WagerError::UnauthorizedInitiator,
     )]
-    pub treasury: UncheckedAccount<'info>,
+    pub initiator_token_account: Account<'info, TokenAccount>,
+
+    /// Challenger's USDC token account for possible payout
+    #[account(
+        mut,
+        constraint = challenger_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
+    )]
+    pub challenger_token_account: Account<'info, TokenAccount>,
+
+    /// Treasury's USDC token account for protocol fees
+    #[account(
+        mut,
+        constraint = treasury_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
+    )]
+    pub treasury_token_account: Account<'info, TokenAccount>,
 
     /// Anyone can crank the oracle resolution once the condition is met
     pub crank: Signer<'info>,
 
-    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
 }
 
 pub fn handle_resolve_by_oracle(ctx: Context<ResolveByOracle>) -> Result<()> {
@@ -347,15 +373,15 @@ pub fn handle_resolve_by_oracle(ctx: Context<ResolveByOracle>) -> Result<()> {
         oracle_value < wager.oracle_target
     };
 
-    let (winner_account, winner_key) = if initiator_wins {
-        (&ctx.accounts.initiator, wager.initiator)
+    let (winner_token_account, winner_key) = if initiator_wins {
+        (&ctx.accounts.initiator_token_account, wager.initiator)
     } else {
         let challenger_key = wager.challenger.ok_or(WagerError::NotActive)?;
         require!(
-            ctx.accounts.challenger.key() == challenger_key,
+            ctx.accounts.challenger_token_account.owner == challenger_key,
             WagerError::InvalidWinner
         );
-        (&ctx.accounts.challenger, challenger_key)
+        (&ctx.accounts.challenger_token_account, challenger_key)
     };
 
     // ── Mark resolved ──────────────────────────────────────────────────────────
@@ -374,11 +400,10 @@ pub fn handle_resolve_by_oracle(ctx: Context<ResolveByOracle>) -> Result<()> {
 
     payout_winner(
         wager,
-        &ctx.accounts.escrow,
-        winner_account,
-        &ctx.accounts.treasury,
-        &ctx.accounts.system_program.to_account_info(),
-        ctx.bumps.escrow,
+        &ctx.accounts.escrow_token_account,
+        winner_token_account,
+        &ctx.accounts.treasury_token_account,
+        &ctx.accounts.token_program,
     )
 }
 

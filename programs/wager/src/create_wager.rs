@@ -1,6 +1,7 @@
 // programs/wager/src/create_wager.rs
 use anchor_lang::prelude::*;
-use anchor_lang::system_program;
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use anchor_spl::associated_token::AssociatedToken;
 use crate::{state::*, errors::WagerError};
 
 const MAX_EXPIRY_SECONDS: i64 = 365 * 24 * 60 * 60; // 1 year
@@ -10,7 +11,7 @@ const MAX_EXPIRY_SECONDS: i64 = 365 * 24 * 60 * 60; // 1 year
 #[derive(AnchorSerialize, AnchorDeserialize)]
 pub struct CreateWagerArgs {
     pub description: String,
-    pub stake_lamports: u64,
+    pub stake_usdc: u64,
     pub expiry_ts: i64,
     pub resolution_source: ResolutionSource,
     pub resolver: Pubkey,
@@ -53,21 +54,35 @@ pub struct CreateWager<'info> {
     )]
     pub wager: Account<'info, Wager>,
 
-    /// Escrow PDA that holds both parties' stakes.
-    /// System-owned; debits use invoke_signed with PDA seeds.
-    /// CHECK: Validated by seeds
+    /// USDC mint account
+    #[account(
+        constraint = usdc_mint.key() == config.usdc_mint @ WagerError::InvalidUsdcMint
+    )]
+    pub usdc_mint: Account<'info, token::Mint>,
+
+    /// Escrow token account (PDA-owned ATA) that holds USDC stakes
+    #[account(
+        init,
+        payer = initiator,
+        associated_token::mint = usdc_mint,
+        associated_token::authority = wager,
+    )]
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    /// Initiator's USDC token account
     #[account(
         mut,
-        seeds  = [b"escrow", wager.key().as_ref()],
-        bump,
+        constraint = initiator_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
+        constraint = initiator_token_account.owner == initiator.key() @ WagerError::UnauthorizedInitiator,
     )]
-    pub escrow: UncheckedAccount<'info>,
+    pub initiator_token_account: Account<'info, TokenAccount>,
 
     #[account(mut)]
     pub initiator: Signer<'info>,
 
-
     pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
 }
 
 pub fn handle_create_wager(
@@ -76,7 +91,7 @@ pub fn handle_create_wager(
 ) -> Result<()> {
     // ── Validation ────────────────────────────────────────────────────────────
     require!(!ctx.accounts.config.paused, WagerError::ProtocolPaused);
-    require!(args.stake_lamports > 0, WagerError::ZeroStake);
+    require!(args.stake_usdc > 0, WagerError::ZeroStake);
     require!(args.description.len() <= 256, WagerError::DescriptionTooLong);
 
     let clock = Clock::get()?;
@@ -94,7 +109,7 @@ pub fn handle_create_wager(
     wager.wager_id                  = wager_id;
     wager.initiator                 = ctx.accounts.initiator.key();
     wager.challenger                = None;
-    wager.stake_lamports            = args.stake_lamports;
+    wager.stake_usdc                = args.stake_usdc;
     wager.description               = args.description.clone();
     wager.status                    = WagerStatus::Pending;
     wager.resolution_source         = args.resolution_source;
@@ -112,19 +127,17 @@ pub fn handle_create_wager(
     wager.oracle_target             = args.oracle_target.unwrap_or(0);
     wager.oracle_initiator_wins_above = args.oracle_initiator_wins_above.unwrap_or(true);
 
-    // ── Transfer initiator's stake to escrow ──────────────────────────────────
-    let escrow_bump = ctx.bumps.escrow;
-    let _ = escrow_bump; // used in accept_wager payout
-
-    system_program::transfer(
+    // ── Transfer initiator's USDC stake to escrow token account ───────────────
+    token::transfer(
         CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            system_program::Transfer {
-                from: ctx.accounts.initiator.to_account_info(),
-                to:   ctx.accounts.escrow.to_account_info(),
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.initiator_token_account.to_account_info(),
+                to: ctx.accounts.escrow_token_account.to_account_info(),
+                authority: ctx.accounts.initiator.to_account_info(),
             },
         ),
-        args.stake_lamports,
+        args.stake_usdc,
     )?;
 
     // ── Increment registry ─────────────────────────────────────────────────────
@@ -133,10 +146,10 @@ pub fn handle_create_wager(
         .ok_or(WagerError::Overflow)?;
 
     msg!(
-        "Wager #{} created by {}. Stake: {} lamports. Expires: {}",
+        "Wager #{} created by {}. Stake: {} micro-USDC. Expires: {}",
         wager_id,
         ctx.accounts.initiator.key(),
-        args.stake_lamports,
+        args.stake_usdc,
         args.expiry_ts,
     );
 
@@ -147,6 +160,13 @@ pub fn handle_create_wager(
 
 #[derive(Accounts)]
 pub struct AcceptWager<'info> {
+    /// Global config — for USDC mint validation
+    #[account(
+        seeds = [b"config"],
+        bump = config.bump,
+    )]
+    pub config: Account<'info, ProtocolConfig>,
+
     #[account(
         mut,
         seeds = [
@@ -158,14 +178,27 @@ pub struct AcceptWager<'info> {
     )]
     pub wager: Account<'info, Wager>,
 
-    /// Escrow that holds the initiator's stake
-    /// CHECK: Validated by seeds
+    /// USDC mint account
+    #[account(
+        constraint = usdc_mint.key() == config.usdc_mint @ WagerError::InvalidUsdcMint
+    )]
+    pub usdc_mint: Account<'info, token::Mint>,
+
+    /// Escrow token account (PDA-owned ATA) that holds USDC stakes
     #[account(
         mut,
-        seeds = [b"escrow", wager.key().as_ref()],
-        bump,
+        associated_token::mint = usdc_mint,
+        associated_token::authority = wager,
     )]
-    pub escrow: UncheckedAccount<'info>,
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    /// Challenger's USDC token account
+    #[account(
+        mut,
+        constraint = challenger_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
+        constraint = challenger_token_account.owner == challenger.key() @ WagerError::UnauthorizedChallenger,
+    )]
+    pub challenger_token_account: Account<'info, TokenAccount>,
 
     #[account(
         mut,
@@ -173,7 +206,7 @@ pub struct AcceptWager<'info> {
     )]
     pub challenger: Signer<'info>,
 
-    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
 }
 
 pub fn handle_accept_wager(ctx: Context<AcceptWager>) -> Result<()> {
@@ -188,23 +221,24 @@ pub fn handle_accept_wager(ctx: Context<AcceptWager>) -> Result<()> {
     wager.challenger = Some(ctx.accounts.challenger.key());
     wager.status     = WagerStatus::Active;
 
-    // ── Transfer challenger's matching stake to escrow ────────────────────────
-    system_program::transfer(
+    // ── Transfer challenger's matching USDC stake to escrow ───────────────────
+    token::transfer(
         CpiContext::new(
-            ctx.accounts.system_program.to_account_info(),
-            system_program::Transfer {
-                from: ctx.accounts.challenger.to_account_info(),
-                to:   ctx.accounts.escrow.to_account_info(),
+            ctx.accounts.token_program.to_account_info(),
+            Transfer {
+                from: ctx.accounts.challenger_token_account.to_account_info(),
+                to: ctx.accounts.escrow_token_account.to_account_info(),
+                authority: ctx.accounts.challenger.to_account_info(),
             },
         ),
-        wager.stake_lamports,
+        wager.stake_usdc,
     )?;
 
     msg!(
-        "Wager #{} accepted by {}. Total escrow: {} lamports.",
+        "Wager #{} accepted by {}. Total escrow: {} micro-USDC.",
         wager.wager_id,
         ctx.accounts.challenger.key(),
-        wager.stake_lamports * 2,
+        wager.stake_usdc * 2,
     );
 
     Ok(())
@@ -214,6 +248,13 @@ pub fn handle_accept_wager(ctx: Context<AcceptWager>) -> Result<()> {
 
 #[derive(Accounts)]
 pub struct CancelWager<'info> {
+    /// Global config — for USDC mint validation
+    #[account(
+        seeds = [b"config"],
+        bump = config.bump,
+    )]
+    pub config: Account<'info, ProtocolConfig>,
+
     #[account(
         mut,
         seeds = [
@@ -226,18 +267,32 @@ pub struct CancelWager<'info> {
     )]
     pub wager: Account<'info, Wager>,
 
-    /// CHECK: Validated by seeds
+    /// USDC mint account
+    #[account(
+        constraint = usdc_mint.key() == config.usdc_mint @ WagerError::InvalidUsdcMint
+    )]
+    pub usdc_mint: Account<'info, token::Mint>,
+
+    /// Escrow token account (PDA-owned ATA) that holds USDC stakes
     #[account(
         mut,
-        seeds = [b"escrow", wager.key().as_ref()],
-        bump,
+        associated_token::mint = usdc_mint,
+        associated_token::authority = wager,
     )]
-    pub escrow: UncheckedAccount<'info>,
+    pub escrow_token_account: Account<'info, TokenAccount>,
+
+    /// Initiator's USDC token account to receive refund
+    #[account(
+        mut,
+        constraint = initiator_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
+        constraint = initiator_token_account.owner == initiator.key() @ WagerError::UnauthorizedInitiator,
+    )]
+    pub initiator_token_account: Account<'info, TokenAccount>,
 
     #[account(mut)]
     pub initiator: Signer<'info>,
 
-    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
 }
 
 pub fn handle_cancel_wager(ctx: Context<CancelWager>) -> Result<()> {
@@ -246,31 +301,35 @@ pub fn handle_cancel_wager(ctx: Context<CancelWager>) -> Result<()> {
 
     wager.status = WagerStatus::Cancelled;
 
-    // Refund initiator's stake from escrow using invoke_signed
-    let refund_amt = ctx.accounts.escrow.lamports();
+    // Refund initiator's USDC stake from escrow using PDA signed transfer
+    let refund_amt = ctx.accounts.escrow_token_account.amount;
     if refund_amt > 0 {
-        let wager_key = wager.key();
-        let escrow_seeds: &[&[u8]] = &[
-            b"escrow",
-            wager_key.as_ref(),
-            &[ctx.bumps.escrow],
+        let _wager_key = wager.key();
+        let bump = wager.bump;
+        let initiator_key = wager.initiator;
+        let wager_id_bytes = wager.wager_id.to_le_bytes();
+        let seeds: &[&[u8]] = &[
+            b"wager",
+            initiator_key.as_ref(),
+            wager_id_bytes.as_ref(),
+            &[bump],
         ];
-        anchor_lang::solana_program::program::invoke_signed(
-            &anchor_lang::solana_program::system_instruction::transfer(
-                &ctx.accounts.escrow.key(),
-                &ctx.accounts.initiator.key(),
-                refund_amt,
+
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.escrow_token_account.to_account_info(),
+                    to: ctx.accounts.initiator_token_account.to_account_info(),
+                    authority: wager.to_account_info(),
+                },
+                &[seeds],
             ),
-            &[
-                ctx.accounts.escrow.to_account_info(),
-                ctx.accounts.initiator.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
-            &[escrow_seeds],
+            refund_amt,
         )?;
     }
 
-    msg!("Wager #{} cancelled. {} lamports refunded.", wager.wager_id, refund_amt);
+    msg!("Wager #{} cancelled. {} micro-USDC refunded.", wager.wager_id, refund_amt);
     Ok(())
 }
 
@@ -279,6 +338,13 @@ pub fn handle_cancel_wager(ctx: Context<CancelWager>) -> Result<()> {
 
 #[derive(Accounts)]
 pub struct ExpireWager<'info> {
+    /// Global config — for USDC mint validation
+    #[account(
+        seeds = [b"config"],
+        bump = config.bump,
+    )]
+    pub config: Account<'info, ProtocolConfig>,
+
     #[account(
         mut,
         seeds = [
@@ -290,22 +356,33 @@ pub struct ExpireWager<'info> {
     )]
     pub wager: Account<'info, Wager>,
 
-    /// CHECK: Validated by seeds
+    /// USDC mint account
+    #[account(
+        constraint = usdc_mint.key() == config.usdc_mint @ WagerError::InvalidUsdcMint
+    )]
+    pub usdc_mint: Account<'info, token::Mint>,
+
+    /// Escrow token account (PDA-owned ATA) that holds USDC stakes
     #[account(
         mut,
-        seeds = [b"escrow", wager.key().as_ref()],
-        bump,
+        associated_token::mint = usdc_mint,
+        associated_token::authority = wager,
     )]
-    pub escrow: UncheckedAccount<'info>,
+    pub escrow_token_account: Account<'info, TokenAccount>,
 
+    /// Initiator's USDC token account to receive refund
     /// CHECK: Receives the refund — must match wager.initiator
     #[account(
         mut,
-        constraint = initiator.key() == wager.initiator,
+        constraint = initiator_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
+        constraint = initiator_token_account.owner == wager.initiator @ WagerError::UnauthorizedInitiator,
     )]
-    pub initiator: UncheckedAccount<'info>,
+    pub initiator_token_account: Account<'info, TokenAccount>,
 
-    pub system_program: Program<'info, System>,
+    /// Anyone can crank expiry
+    pub crank: Signer<'info>,
+
+    pub token_program: Program<'info, Token>,
 }
 
 pub fn handle_expire_wager(ctx: Context<ExpireWager>) -> Result<()> {
@@ -317,29 +394,33 @@ pub fn handle_expire_wager(ctx: Context<ExpireWager>) -> Result<()> {
 
     wager.status = WagerStatus::Expired;
 
-    let refund_amt = ctx.accounts.escrow.lamports();
+    let refund_amt = ctx.accounts.escrow_token_account.amount;
     if refund_amt > 0 {
-        let wager_key = wager.key();
-        let escrow_seeds: &[&[u8]] = &[
-            b"escrow",
-            wager_key.as_ref(),
-            &[ctx.bumps.escrow],
+        let _wager_key = wager.key();
+        let bump = wager.bump;
+        let initiator_key = wager.initiator;
+        let wager_id_bytes = wager.wager_id.to_le_bytes();
+        let seeds: &[&[u8]] = &[
+            b"wager",
+            initiator_key.as_ref(),
+            wager_id_bytes.as_ref(),
+            &[bump],
         ];
-        anchor_lang::solana_program::program::invoke_signed(
-            &anchor_lang::solana_program::system_instruction::transfer(
-                &ctx.accounts.escrow.key(),
-                &ctx.accounts.initiator.key(),
-                refund_amt,
+
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.escrow_token_account.to_account_info(),
+                    to: ctx.accounts.initiator_token_account.to_account_info(),
+                    authority: wager.to_account_info(),
+                },
+                &[seeds],
             ),
-            &[
-                ctx.accounts.escrow.to_account_info(),
-                ctx.accounts.initiator.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
-            &[escrow_seeds],
+            refund_amt,
         )?;
     }
 
-    msg!("Wager #{} expired. {} lamports refunded.", wager.wager_id, refund_amt);
+    msg!("Wager #{} expired. {} micro-USDC refunded.", wager.wager_id, refund_amt);
     Ok(())
 }

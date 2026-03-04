@@ -72,6 +72,11 @@ pub mod wager {
         handle_update_fee(ctx, new_fee_bps)
     }
 
+    /// Admin: migrate config to add USDC mint (one-time migration)
+    pub fn migrate_config(ctx: Context<MigrateConfig>) -> Result<()> {
+        handle_migrate_config(ctx)
+    }
+
     // ── Wager Lifecycle ───────────────────────────────────────────────────────
 
     /// Create a new P2P wager and escrow the initiator's stake.

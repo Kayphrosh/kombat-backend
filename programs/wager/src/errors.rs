@@ -51,6 +51,9 @@ pub enum WagerError {
     #[msg("Insufficient lamports for stake + fees")]
     InsufficientFunds,
 
+    #[msg("Invalid USDC mint address")]
+    InvalidUsdcMint,
+
     // ── Resolution errors ─────────────────────────────────────────────────────
     #[msg("Winner must be the initiator or challenger")]
     InvalidWinner,

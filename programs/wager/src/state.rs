@@ -60,8 +60,8 @@ pub struct Wager {
     /// The party who accepted the wager (None until accepted)
     pub challenger: Option<Pubkey>,
 
-    /// SOL stake (in lamports) each side must put in
-    pub stake_lamports: u64,
+    /// USDC stake (in micro-USDC, 6 decimals: 1 USDC = 1_000_000) each side must put in
+    pub stake_usdc: u64,
 
     /// Human-readable description (max 256 bytes)
     pub description: String,
@@ -119,7 +119,7 @@ impl Wager {
         + 8   // wager_id
         + 32  // initiator
         + 1 + 32  // challenger (Option<Pubkey>)
-        + 8   // stake_lamports
+        + 8   // stake_usdc
         + 4 + 256 // description (String: 4-byte length prefix + max 256 bytes)
         + 2   // status (enum)
         + 2   // resolution_source (enum)
@@ -170,8 +170,10 @@ pub struct ProtocolConfig {
     pub default_fee_bps: u16,
     pub dispute_window_seconds: i64,
     pub paused: bool,
+    /// USDC SPL Token mint address (added in USDC migration)
+    pub usdc_mint: Pubkey,
 }
 
 impl ProtocolConfig {
-    pub const LEN: usize = 8 + 1 + 32 + 32 + 2 + 8 + 1;
+    pub const LEN: usize = 8 + 1 + 32 + 32 + 2 + 8 + 1 + 32; // usdc_mint added at end
 }

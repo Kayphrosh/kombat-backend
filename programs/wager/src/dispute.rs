@@ -1,6 +1,6 @@
 // programs/wager/src/dispute.rs
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program;
+use anchor_spl::token::{self, Token, TokenAccount, Transfer};
 use crate::{state::*, errors::WagerError};
 
 // ─── Instruction: Open Dispute ────────────────────────────────────────────────
@@ -93,34 +93,42 @@ pub struct SettleDispute<'info> {
     )]
     pub wager: Account<'info, Wager>,
 
-    /// CHECK: Validated by seeds
+    /// USDC mint account
+    #[account(
+        constraint = usdc_mint.key() == config.usdc_mint @ WagerError::InvalidUsdcMint
+    )]
+    pub usdc_mint: Account<'info, token::Mint>,
+
+    /// Escrow token account (PDA-owned ATA) that holds USDC stakes
     #[account(
         mut,
-        seeds = [b"escrow", wager.key().as_ref()],
-        bump,
+        associated_token::mint = usdc_mint,
+        associated_token::authority = wager,
     )]
-    pub escrow: UncheckedAccount<'info>,
+    pub escrow_token_account: Account<'info, TokenAccount>,
 
-    /// The winner declared by admin
-    /// CHECK: Validated against wager participants in handler
-    #[account(mut)]
-    pub winner: UncheckedAccount<'info>,
-
-    /// CHECK: Treasury from protocol config
+    /// The winner's USDC token account declared by admin
     #[account(
         mut,
-        constraint = treasury.key() == config.treasury,
+        constraint = winner_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
     )]
-    pub treasury: UncheckedAccount<'info>,
+    pub winner_token_account: Account<'info, TokenAccount>,
+
+    /// Treasury's USDC token account for protocol fees
+    #[account(
+        mut,
+        constraint = treasury_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
+    )]
+    pub treasury_token_account: Account<'info, TokenAccount>,
 
     pub admin: Signer<'info>,
 
-    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
 }
 
 pub fn handle_settle_dispute(ctx: Context<SettleDispute>) -> Result<()> {
-    let wager     = &mut ctx.accounts.wager;
-    let winner_key = ctx.accounts.winner.key();
+    let wager = &mut ctx.accounts.wager;
+    let winner_key = ctx.accounts.winner_token_account.owner;
 
     // ── Must be in disputed state ────────────────────────────────────────────
     require!(wager.status == WagerStatus::Disputed, WagerError::NotDisputed);
@@ -141,8 +149,8 @@ pub fn handle_settle_dispute(ctx: Context<SettleDispute>) -> Result<()> {
         winner_key
     );
 
-    // ── Payout using invoke_signed ─────────────────────────────────────────
-    let total_pot  = ctx.accounts.escrow.lamports();
+    // ── Payout using PDA-signed SPL token transfer ─────────────────────────
+    let total_pot = ctx.accounts.escrow_token_account.amount;
     let fee_amount = (total_pot as u128)
         .checked_mul(wager.protocol_fee_bps as u128)
         .ok_or(WagerError::Overflow)?
@@ -150,47 +158,48 @@ pub fn handle_settle_dispute(ctx: Context<SettleDispute>) -> Result<()> {
         .ok_or(WagerError::Overflow)? as u64;
     let winner_payout = total_pot.checked_sub(fee_amount).ok_or(WagerError::Overflow)?;
 
-    let wager_key = wager.key();
-    let escrow_seeds: &[&[u8]] = &[
-        b"escrow",
-        wager_key.as_ref(),
-        &[ctx.bumps.escrow],
+    let initiator_key = wager.initiator;
+    let wager_id_bytes = wager.wager_id.to_le_bytes();
+    let bump = wager.bump;
+    let seeds: &[&[u8]] = &[
+        b"wager",
+        initiator_key.as_ref(),
+        wager_id_bytes.as_ref(),
+        &[bump],
     ];
 
     if winner_payout > 0 {
-        solana_program::program::invoke_signed(
-            &solana_program::system_instruction::transfer(
-                &ctx.accounts.escrow.key(),
-                &ctx.accounts.winner.key(),
-                winner_payout,
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.escrow_token_account.to_account_info(),
+                    to: ctx.accounts.winner_token_account.to_account_info(),
+                    authority: wager.to_account_info(),
+                },
+                &[seeds],
             ),
-            &[
-                ctx.accounts.escrow.to_account_info(),
-                ctx.accounts.winner.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
-            &[escrow_seeds],
+            winner_payout,
         )?;
     }
 
     if fee_amount > 0 {
-        solana_program::program::invoke_signed(
-            &solana_program::system_instruction::transfer(
-                &ctx.accounts.escrow.key(),
-                &ctx.accounts.treasury.key(),
-                fee_amount,
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.escrow_token_account.to_account_info(),
+                    to: ctx.accounts.treasury_token_account.to_account_info(),
+                    authority: wager.to_account_info(),
+                },
+                &[seeds],
             ),
-            &[
-                ctx.accounts.escrow.to_account_info(),
-                ctx.accounts.treasury.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
-            &[escrow_seeds],
+            fee_amount,
         )?;
     }
 
     msg!(
-        "Settled payout: {} lamports to winner, {} fee to treasury",
+        "Settled payout: {} micro-USDC to winner, {} fee to treasury",
         winner_payout,
         fee_amount
     );
@@ -221,36 +230,46 @@ pub struct CloseExpiredDispute<'info> {
     )]
     pub wager: Account<'info, Wager>,
 
-    /// CHECK: Validated by seeds
+    /// USDC mint account
+    #[account(
+        constraint = usdc_mint.key() == config.usdc_mint @ WagerError::InvalidUsdcMint
+    )]
+    pub usdc_mint: Account<'info, token::Mint>,
+
+    /// Escrow token account (PDA-owned ATA) that holds USDC stakes
     #[account(
         mut,
-        seeds = [b"escrow", wager.key().as_ref()],
-        bump,
+        associated_token::mint = usdc_mint,
+        associated_token::authority = wager,
     )]
-    pub escrow: UncheckedAccount<'info>,
+    pub escrow_token_account: Account<'info, TokenAccount>,
 
-    /// CHECK: Must be wager.initiator
+    /// Initiator's USDC token account for refund
     #[account(
         mut,
-        constraint = initiator.key() == wager.initiator
+        constraint = initiator_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
+        constraint = initiator_token_account.owner == wager.initiator @ WagerError::UnauthorizedInitiator,
     )]
-    pub initiator: UncheckedAccount<'info>,
+    pub initiator_token_account: Account<'info, TokenAccount>,
 
-    /// CHECK: Must be wager.challenger
-    #[account(mut)]
-    pub challenger: UncheckedAccount<'info>,
-
-    /// CHECK: Treasury
+    /// Challenger's USDC token account for refund
     #[account(
         mut,
-        constraint = treasury.key() == config.treasury,
+        constraint = challenger_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
     )]
-    pub treasury: UncheckedAccount<'info>,
+    pub challenger_token_account: Account<'info, TokenAccount>,
+
+    /// Treasury's USDC token account for protocol fees
+    #[account(
+        mut,
+        constraint = treasury_token_account.mint == usdc_mint.key() @ WagerError::InvalidUsdcMint,
+    )]
+    pub treasury_token_account: Account<'info, TokenAccount>,
 
     /// Anyone can crank expiry
     pub crank: Signer<'info>,
 
-    pub system_program: Program<'info, System>,
+    pub token_program: Program<'info, Token>,
 }
 
 /// Grace period after dispute_window before stale disputes can be force-closed.
@@ -273,14 +292,14 @@ pub fn handle_close_expired_dispute(ctx: Context<CloseExpiredDispute>) -> Result
     );
 
     require!(
-        ctx.accounts.challenger.key() == wager.challenger.ok_or(WagerError::NotActive)?,
+        ctx.accounts.challenger_token_account.owner == wager.challenger.ok_or(WagerError::NotActive)?,
         WagerError::InvalidWinner
     );
 
     wager.status = WagerStatus::Expired;
 
-    // ── Refund both parties equally minus protocol fee, using invoke_signed ───
-    let total_escrow = ctx.accounts.escrow.lamports();
+    // ── Refund both parties equally minus protocol fee, using PDA-signed transfers ───
+    let total_escrow = ctx.accounts.escrow_token_account.amount;
     let fee_amount = (total_escrow as u128)
         .checked_mul(wager.protocol_fee_bps as u128)
         .ok_or(WagerError::Overflow)?
@@ -290,66 +309,66 @@ pub fn handle_close_expired_dispute(ctx: Context<CloseExpiredDispute>) -> Result
     let refundable = total_escrow.checked_sub(fee_amount).ok_or(WagerError::Overflow)?;
     let each_refund = refundable / 2;
 
-    let wager_key = wager.key();
-    let escrow_seeds: &[&[u8]] = &[
-        b"escrow",
-        wager_key.as_ref(),
-        &[ctx.bumps.escrow],
+    let initiator_key = wager.initiator;
+    let wager_id_bytes = wager.wager_id.to_le_bytes();
+    let bump = wager.bump;
+    let seeds: &[&[u8]] = &[
+        b"wager",
+        initiator_key.as_ref(),
+        wager_id_bytes.as_ref(),
+        &[bump],
     ];
 
     // Refund initiator
     if each_refund > 0 {
-        solana_program::program::invoke_signed(
-            &solana_program::system_instruction::transfer(
-                &ctx.accounts.escrow.key(),
-                &ctx.accounts.initiator.key(),
-                each_refund,
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.escrow_token_account.to_account_info(),
+                    to: ctx.accounts.initiator_token_account.to_account_info(),
+                    authority: wager.to_account_info(),
+                },
+                &[seeds],
             ),
-            &[
-                ctx.accounts.escrow.to_account_info(),
-                ctx.accounts.initiator.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
-            &[escrow_seeds],
+            each_refund,
         )?;
     }
 
     // Refund challenger
     if each_refund > 0 {
-        solana_program::program::invoke_signed(
-            &solana_program::system_instruction::transfer(
-                &ctx.accounts.escrow.key(),
-                &ctx.accounts.challenger.key(),
-                each_refund,
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.escrow_token_account.to_account_info(),
+                    to: ctx.accounts.challenger_token_account.to_account_info(),
+                    authority: wager.to_account_info(),
+                },
+                &[seeds],
             ),
-            &[
-                ctx.accounts.escrow.to_account_info(),
-                ctx.accounts.challenger.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
-            &[escrow_seeds],
+            each_refund,
         )?;
     }
 
     // Protocol fee to treasury
     if fee_amount > 0 {
-        solana_program::program::invoke_signed(
-            &solana_program::system_instruction::transfer(
-                &ctx.accounts.escrow.key(),
-                &ctx.accounts.treasury.key(),
-                fee_amount,
+        token::transfer(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                Transfer {
+                    from: ctx.accounts.escrow_token_account.to_account_info(),
+                    to: ctx.accounts.treasury_token_account.to_account_info(),
+                    authority: wager.to_account_info(),
+                },
+                &[seeds],
             ),
-            &[
-                ctx.accounts.escrow.to_account_info(),
-                ctx.accounts.treasury.to_account_info(),
-                ctx.accounts.system_program.to_account_info(),
-            ],
-            &[escrow_seeds],
+            fee_amount,
         )?;
     }
 
     msg!(
-        "Stale dispute on wager #{} force-closed. Each party refunded {} lamports.",
+        "Stale dispute on wager #{} force-closed. Each party refunded {} micro-USDC.",
         wager.wager_id,
         each_refund
     );

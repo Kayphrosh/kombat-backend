@@ -118,7 +118,7 @@ pub enum ResolutionSource {
 #[derive(borsh::BorshSerialize)]
 pub struct CreateWagerArgs {
     pub description: String,
-    pub stake_lamports: u64,
+    pub stake_usdc: u64,
     pub expiry_ts: i64,
     pub resolution_source: ResolutionSource,
     pub resolver: Pubkey,
@@ -138,7 +138,7 @@ pub async fn create_wager(
     if req.description.len() > 256 {
         return Err(bad_request("Description exceeds 256 characters"));
     }
-    if req.stake_lamports == 0 {
+    if req.stake_usdc == 0 {
         return Err(bad_request("Stake must be > 0"));
     }
 
@@ -189,7 +189,7 @@ pub async fn create_wager(
 
     let args = CreateWagerArgs {
         description: req.description.clone(),
-        stake_lamports: req.stake_lamports,
+        stake_usdc: req.stake_usdc,
         expiry_ts: req.expiry_ts,
         resolution_source,
         resolver,
@@ -219,7 +219,7 @@ pub async fn create_wager(
         wager_id: wager_id as i64,
         initiator: req.initiator.clone(),
         challenger: req.challenger_address.clone(),
-        stake_lamports: req.stake_lamports as i64,
+        stake_usdc: req.stake_usdc as i64,
         description: req.description.clone(),
         status: "pending".to_string(),
         resolution_source: req.resolution_source.clone(),
@@ -255,7 +255,7 @@ pub async fn create_wager(
                 "wager_address": on_chain_address,
                 "initiator": wager_record.initiator,
                 "description": desc_clone,
-                "stake_lamports": wager_record.stake_lamports,
+                "stake_usdc": wager_record.stake_usdc,
             });
 
             // In-app notification
@@ -268,9 +268,9 @@ pub async fn create_wager(
             match db.get_push_tokens(challenger).await {
                 Ok(tokens) if !tokens.is_empty() => {
                     let title = "New Kombat Challenge!".to_string();
-                    let body = format!("You've been challenged: \"{}\" for {} SOL",
+                    let body = format!("You've been challenged: \"{}\" for {} USDC",
                         desc_clone,
-                        wager_record.stake_lamports as f64 / 1_000_000_000.0
+                        wager_record.stake_usdc as f64 / 1_000_000.0
                     );
                     tokio::spawn(async move {
                         if let Err(e) = crate::services::push::send_expo_push(&tokens, &title, &body, Some(payload)).await {
@@ -286,8 +286,8 @@ pub async fn create_wager(
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: format!(
-            "Create wager: '{}' for {} lamports",
-            req.description, req.stake_lamports
+            "Create wager: '{}' for {} micro-USDC",
+            req.description, req.stake_usdc
         ),
     })))
 }

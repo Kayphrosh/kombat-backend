@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateWagerRequest {
     pub initiator: String,
-    pub stake_lamports: u64,
+    pub stake_usdc: u64,
     pub description: String,
     pub expiry_ts: i64,
     pub resolution_source: String,
@@ -79,7 +79,7 @@ pub struct WagerRecord {
     pub wager_id: i64,
     pub initiator: String,
     pub challenger: Option<String>,
-    pub stake_lamports: i64,
+    pub stake_usdc: i64,
     pub description: String,
     pub status: String,
     pub resolution_source: String,
