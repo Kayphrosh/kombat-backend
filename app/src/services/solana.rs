@@ -17,9 +17,17 @@ use std::str::FromStr;
 /// The deployed Wager program ID
 pub const WAGER_PROGRAM_ID: &str = "Dj2Hot5XJLv9S724BRkWohrhUfzLFERBnZJ9da2WBJQK";
 
+/// SPL Token program ID
+pub const SPL_TOKEN_PROGRAM_ID: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
+
+/// SPL Associated Token Account program ID
+pub const SPL_ASSOCIATED_TOKEN_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
+
 pub struct SolanaService {
     pub rpc: RpcClient,
     pub program_id: Pubkey,
+    pub token_program_id: Pubkey,
+    pub associated_token_program_id: Pubkey,
 }
 
 impl SolanaService {
@@ -27,6 +35,8 @@ impl SolanaService {
         Self {
             rpc: RpcClient::new(rpc_url.to_string()),
             program_id: Pubkey::from_str(WAGER_PROGRAM_ID).unwrap(),
+            token_program_id: Pubkey::from_str(SPL_TOKEN_PROGRAM_ID).unwrap(),
+            associated_token_program_id: Pubkey::from_str(SPL_ASSOCIATED_TOKEN_PROGRAM_ID).unwrap(),
         }
     }
 
@@ -55,6 +65,33 @@ impl SolanaService {
 
     pub fn config_pda(&self) -> (Pubkey, u8) {
         Pubkey::find_program_address(&[b"config"], &self.program_id)
+    }
+
+    /// Derive the Associated Token Account address for a given wallet and mint.
+    pub fn get_associated_token_address(&self, wallet: &Pubkey, mint: &Pubkey) -> Pubkey {
+        let seeds = &[
+            wallet.as_ref(),
+            self.token_program_id.as_ref(),
+            mint.as_ref(),
+        ];
+        let (ata, _) = Pubkey::find_program_address(seeds, &self.associated_token_program_id);
+        ata
+    }
+
+    /// Read the USDC mint pubkey from the on-chain ProtocolConfig PDA.
+    /// Layout: 8 (disc) + 1 (bump) + 32 (admin) + 32 (treasury) + 2 (fee_bps) + 8 (dispute_window) + 1 (paused) + 32 (usdc_mint)
+    pub async fn get_usdc_mint(&self) -> Result<Pubkey> {
+        let (config_pda, _) = self.config_pda();
+        let account = self.rpc.get_account(&config_pda).await
+            .context("Failed to read ProtocolConfig account")?;
+        let data = &account.data;
+        // usdc_mint offset: 8 + 1 + 32 + 32 + 2 + 8 + 1 = 84
+        if data.len() < 116 {
+            anyhow::bail!("ProtocolConfig account data too short (expected at least 116 bytes, got {})", data.len());
+        }
+        let usdc_mint_bytes: [u8; 32] = data[84..116].try_into()
+            .map_err(|_| anyhow::anyhow!("Failed to parse usdc_mint pubkey"))?;
+        Ok(Pubkey::new_from_array(usdc_mint_bytes))
     }
 
     // ── Transaction Serialization ─────────────────────────────────────────────
@@ -104,16 +141,27 @@ impl SolanaService {
     }
 
     /// Build the `create_wager` instruction.
+    /// 
+    /// # Arguments
+    /// * `initiator` - The initiator's wallet pubkey
+    /// * `wager_id` - The wager ID from the registry
+    /// * `usdc_mint` - The USDC mint address from on-chain config
+    /// * `initiator_token_account` - The initiator's USDC ATA
+    /// * `args_data` - Borsh-serialized CreateWagerArgs
     pub fn ix_create_wager(
         &self,
         initiator: &Pubkey,
         wager_id: u64,
-        args_data: Vec<u8>,  // borsh-serialized CreateWagerArgs
+        usdc_mint: &Pubkey,
+        initiator_token_account: &Pubkey,
+        args_data: Vec<u8>,
     ) -> Instruction {
         let (config, _)   = self.config_pda();
         let (registry, _) = self.registry_pda(initiator);
         let (wager, _)    = self.wager_pda(initiator, wager_id);
-        let (escrow, _)   = self.escrow_pda(&wager);
+        
+        // Escrow token account is the ATA owned by the wager PDA
+        let escrow_token_account = self.get_associated_token_address(&wager, usdc_mint);
 
         let mut data = anchor_discriminator("create_wager");
         data.extend_from_slice(&args_data);
@@ -121,68 +169,118 @@ impl SolanaService {
         Instruction {
             program_id: self.program_id,
             accounts: vec![
-                // 1. config
+                // 1. config (readonly)
                 AccountMeta::new_readonly(config, false),
-                // 2. registry
+                // 2. registry (mutable)
                 AccountMeta::new(registry, false),
-                // 3. wager
+                // 3. wager (init, mutable)
                 AccountMeta::new(wager, false),
-                // 4. escrow
-                AccountMeta::new(escrow, false),
-                // 5. initiator
+                // 4. usdc_mint (readonly)
+                AccountMeta::new_readonly(*usdc_mint, false),
+                // 5. escrow_token_account (init, mutable)
+                AccountMeta::new(escrow_token_account, false),
+                // 6. initiator_token_account (mutable)
+                AccountMeta::new(*initiator_token_account, false),
+                // 7. initiator (signer, mutable)
                 AccountMeta::new(*initiator, true),
-                // 6. system_program
+                // 8. system_program
                 AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                // 9. token_program
+                AccountMeta::new_readonly(self.token_program_id, false),
+                // 10. associated_token_program
+                AccountMeta::new_readonly(self.associated_token_program_id, false),
             ],
             data,
         }
     }
 
     /// Build the `accept_wager` instruction.
+    /// 
+    /// # Arguments
+    /// * `initiator` - The original initiator's wallet pubkey (for PDA derivation)
+    /// * `wager_id` - The wager ID
+    /// * `challenger` - The challenger's wallet pubkey
+    /// * `usdc_mint` - The USDC mint address from on-chain config
+    /// * `challenger_token_account` - The challenger's USDC ATA
     pub fn ix_accept_wager(
         &self,
         initiator: &Pubkey,
         wager_id: u64,
         challenger: &Pubkey,
+        usdc_mint: &Pubkey,
+        challenger_token_account: &Pubkey,
     ) -> Instruction {
+        let (config, _) = self.config_pda();
         let (wager, _)  = self.wager_pda(initiator, wager_id);
-        let (escrow, _) = self.escrow_pda(&wager);
+        
+        // Escrow token account is the ATA owned by the wager PDA
+        let escrow_token_account = self.get_associated_token_address(&wager, usdc_mint);
 
         Instruction {
             program_id: self.program_id,
             accounts: vec![
+                // 1. config (readonly)
+                AccountMeta::new_readonly(config, false),
+                // 2. wager (mutable)
                 AccountMeta::new(wager, false),
-                AccountMeta::new(escrow, false),
+                // 3. usdc_mint (readonly)
+                AccountMeta::new_readonly(*usdc_mint, false),
+                // 4. escrow_token_account (mutable)
+                AccountMeta::new(escrow_token_account, false),
+                // 5. challenger_token_account (mutable)
+                AccountMeta::new(*challenger_token_account, false),
+                // 6. challenger (signer, mutable)
                 AccountMeta::new(*challenger, true),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                // 7. token_program
+                AccountMeta::new_readonly(self.token_program_id, false),
             ],
             data: anchor_discriminator("accept_wager"),
         }
     }
 
     /// Build the `resolve_by_arbitrator` instruction.
+    /// 
+    /// # Arguments
+    /// * `initiator` - The original initiator's wallet pubkey (for PDA derivation)
+    /// * `wager_id` - The wager ID
+    /// * `usdc_mint` - The USDC mint address from on-chain config
+    /// * `winner_token_account` - The winner's USDC ATA
+    /// * `treasury_token_account` - The treasury's USDC ATA for protocol fees
+    /// * `resolver` - The arbitrator who is resolving the wager
     pub fn ix_resolve_by_arbitrator(
         &self,
         initiator: &Pubkey,
         wager_id: u64,
-        winner: &Pubkey,
+        usdc_mint: &Pubkey,
+        winner_token_account: &Pubkey,
+        treasury_token_account: &Pubkey,
         resolver: &Pubkey,
-        treasury: &Pubkey,
     ) -> Instruction {
         let (config, _) = self.config_pda();
         let (wager, _)  = self.wager_pda(initiator, wager_id);
-        let (escrow, _) = self.escrow_pda(&wager);
+        
+        // Escrow token account is the ATA owned by the wager PDA
+        let escrow_token_account = self.get_associated_token_address(&wager, usdc_mint);
 
         Instruction {
             program_id: self.program_id,
             accounts: vec![
+                // 1. config (readonly)
                 AccountMeta::new_readonly(config, false),
+                // 2. wager (mutable)
                 AccountMeta::new(wager, false),
-                AccountMeta::new(escrow, false),
-                AccountMeta::new(*winner, false),
-                AccountMeta::new(*treasury, false),
+                // 3. usdc_mint (readonly)
+                AccountMeta::new_readonly(*usdc_mint, false),
+                // 4. escrow_token_account (mutable)
+                AccountMeta::new(escrow_token_account, false),
+                // 5. winner_token_account (mutable)
+                AccountMeta::new(*winner_token_account, false),
+                // 6. treasury_token_account (mutable)
+                AccountMeta::new(*treasury_token_account, false),
+                // 7. resolver (signer)
                 AccountMeta::new_readonly(*resolver, true),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                // 8. token_program
+                AccountMeta::new_readonly(self.token_program_id, false),
             ],
             data: anchor_discriminator("resolve_by_arbitrator"),
         }
@@ -210,46 +308,90 @@ impl SolanaService {
     }
 
     /// Build the `cancel_wager` instruction.
-    pub fn ix_cancel_wager(&self, initiator: &Pubkey, wager_id: u64) -> Instruction {
+    /// 
+    /// # Arguments
+    /// * `initiator` - The initiator's wallet pubkey
+    /// * `wager_id` - The wager ID
+    /// * `usdc_mint` - The USDC mint address from on-chain config
+    /// * `initiator_token_account` - The initiator's USDC ATA to receive refund
+    pub fn ix_cancel_wager(
+        &self,
+        initiator: &Pubkey,
+        wager_id: u64,
+        usdc_mint: &Pubkey,
+        initiator_token_account: &Pubkey,
+    ) -> Instruction {
+        let (config, _) = self.config_pda();
         let (wager, _)  = self.wager_pda(initiator, wager_id);
-        let (escrow, _) = self.escrow_pda(&wager);
+        
+        // Escrow token account is the ATA owned by the wager PDA
+        let escrow_token_account = self.get_associated_token_address(&wager, usdc_mint);
 
         Instruction {
             program_id: self.program_id,
             accounts: vec![
+                // 1. config (readonly)
+                AccountMeta::new_readonly(config, false),
+                // 2. wager (mutable)
                 AccountMeta::new(wager, false),
-                AccountMeta::new(escrow, false),
+                // 3. usdc_mint (readonly)
+                AccountMeta::new_readonly(*usdc_mint, false),
+                // 4. escrow_token_account (mutable)
+                AccountMeta::new(escrow_token_account, false),
+                // 5. initiator_token_account (mutable) - receives refund
+                AccountMeta::new(*initiator_token_account, false),
+                // 6. initiator (signer, mutable)
                 AccountMeta::new(*initiator, true),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                // 7. token_program
+                AccountMeta::new_readonly(self.token_program_id, false),
             ],
             data: anchor_discriminator("cancel_wager"),
         }
     }
 
     /// Build the `consent_resolve` instruction (mutual consent winner declaration).
+    /// 
+    /// # Arguments
+    /// * `initiator` - The original initiator's wallet pubkey (for PDA derivation)
+    /// * `wager_id` - The wager ID
+    /// * `usdc_mint` - The USDC mint address from on-chain config
+    /// * `participant` - The participant giving consent
+    /// * `winner_token_account` - The declared winner's USDC ATA
+    /// * `treasury_token_account` - The treasury's USDC ATA for protocol fees
     pub fn ix_consent_resolve(
         &self,
         initiator: &Pubkey,
         wager_id: u64,
+        usdc_mint: &Pubkey,
         participant: &Pubkey,
-        declared_winner: &Pubkey,
-        treasury: &Pubkey,
+        winner_token_account: &Pubkey,
+        treasury_token_account: &Pubkey,
     ) -> Instruction {
         let (config, _) = self.config_pda();
         let (wager, _)  = self.wager_pda(initiator, wager_id);
-        let (escrow, _) = self.escrow_pda(&wager);
+        
+        // Escrow token account is the ATA owned by the wager PDA
+        let escrow_token_account = self.get_associated_token_address(&wager, usdc_mint);
 
         Instruction {
             program_id: self.program_id,
             accounts: vec![
-                // Must match: ConsentResolve { config, wager, escrow, participant, winner, treasury, system_program }
+                // 1. config (readonly)
                 AccountMeta::new_readonly(config, false),
+                // 2. wager (mutable)
                 AccountMeta::new(wager, false),
-                AccountMeta::new(escrow, false),
+                // 3. usdc_mint (readonly)
+                AccountMeta::new_readonly(*usdc_mint, false),
+                // 4. escrow_token_account (mutable)
+                AccountMeta::new(escrow_token_account, false),
+                // 5. participant (signer)
                 AccountMeta::new_readonly(*participant, true),
-                AccountMeta::new(*declared_winner, false),
-                AccountMeta::new(*treasury, false),
-                AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+                // 6. winner_token_account (mutable)
+                AccountMeta::new(*winner_token_account, false),
+                // 7. treasury_token_account (mutable)
+                AccountMeta::new(*treasury_token_account, false),
+                // 8. token_program
+                AccountMeta::new_readonly(self.token_program_id, false),
             ],
             data: anchor_discriminator("consent_resolve"),
         }

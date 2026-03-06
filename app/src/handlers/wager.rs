@@ -201,7 +201,20 @@ pub async fn create_wager(
     let args_data = borsh::to_vec(&args)
         .map_err(|e| internal_error(format!("Borsh serialization failed: {}", e)))?;
 
-    let ix = state.solana.ix_create_wager(&initiator, wager_id, args_data);
+    // Fetch the USDC mint from on-chain config
+    let usdc_mint = state.solana.get_usdc_mint().await
+        .map_err(|e| internal_error(format!("Failed to fetch USDC mint from config: {}", e)))?;
+    
+    // Derive the initiator's USDC Associated Token Account
+    let initiator_token_account = state.solana.get_associated_token_address(&initiator, &usdc_mint);
+
+    let ix = state.solana.ix_create_wager(
+        &initiator,
+        wager_id,
+        &usdc_mint,
+        &initiator_token_account,
+        args_data,
+    );
     instructions.push(ix);
 
     let tx_b64 = state.solana
@@ -308,10 +321,19 @@ pub async fn accept_wager(
     let challenger = Pubkey::from_str(&req.challenger)
         .map_err(|_| bad_request("Invalid challenger pubkey"))?;
 
+    // Fetch the USDC mint from on-chain config
+    let usdc_mint = state.solana.get_usdc_mint().await
+        .map_err(|e| internal_error(format!("Failed to fetch USDC mint from config: {}", e)))?;
+    
+    // Derive the challenger's USDC Associated Token Account
+    let challenger_token_account = state.solana.get_associated_token_address(&challenger, &usdc_mint);
+
     let ix = state.solana.ix_accept_wager(
         &initiator,
         wager.wager_id as u64,
         &challenger,
+        &usdc_mint,
+        &challenger_token_account,
     );
 
     let tx_b64 = state.solana
@@ -366,7 +388,19 @@ pub async fn cancel_wager(
     let initiator = Pubkey::from_str(&wager.initiator)
         .map_err(|_| internal_error("Stored initiator pubkey invalid"))?;
 
-    let ix = state.solana.ix_cancel_wager(&initiator, wager.wager_id as u64);
+    // Fetch the USDC mint from on-chain config
+    let usdc_mint = state.solana.get_usdc_mint().await
+        .map_err(|e| internal_error(format!("Failed to fetch USDC mint from config: {}", e)))?;
+    
+    // Derive the initiator's USDC Associated Token Account
+    let initiator_token_account = state.solana.get_associated_token_address(&initiator, &usdc_mint);
+
+    let ix = state.solana.ix_cancel_wager(
+        &initiator,
+        wager.wager_id as u64,
+        &usdc_mint,
+        &initiator_token_account,
+    );
 
     let tx_b64 = state.solana
         .build_transaction(vec![ix], &initiator)
@@ -397,8 +431,20 @@ pub async fn decline_wager(
     let initiator = Pubkey::from_str(&wager.initiator)
         .map_err(|_| internal_error("Stored initiator pubkey invalid"))?;
 
+    // Fetch the USDC mint from on-chain config
+    let usdc_mint = state.solana.get_usdc_mint().await
+        .map_err(|e| internal_error(format!("Failed to fetch USDC mint from config: {}", e)))?;
+    
+    // Derive the initiator's USDC Associated Token Account (they'll receive the refund)
+    let initiator_token_account = state.solana.get_associated_token_address(&initiator, &usdc_mint);
+
     // Build a cancel ix — the challenger declines
-    let ix = state.solana.ix_cancel_wager(&initiator, wager.wager_id as u64);
+    let ix = state.solana.ix_cancel_wager(
+        &initiator,
+        wager.wager_id as u64,
+        &usdc_mint,
+        &initiator_token_account,
+    );
 
     let tx_b64 = state.solana
         .build_transaction(vec![ix], &challenger)
@@ -437,16 +483,24 @@ pub async fn resolve_wager(
         .map_err(|_| bad_request("Invalid winner pubkey"))?;
     let resolver = Pubkey::from_str(&req.caller)
         .map_err(|_| bad_request("Invalid caller pubkey"))?;
-    // Read the treasury from on-chain ProtocolConfig
+    
+    // Read the treasury and USDC mint from on-chain ProtocolConfig
     let treasury = state.solana.get_treasury().await
         .map_err(|e| internal_error(format!("Failed to read treasury: {}", e)))?;
+    let usdc_mint = state.solana.get_usdc_mint().await
+        .map_err(|e| internal_error(format!("Failed to fetch USDC mint from config: {}", e)))?;
+    
+    // Derive token accounts
+    let winner_token_account = state.solana.get_associated_token_address(&winner, &usdc_mint);
+    let treasury_token_account = state.solana.get_associated_token_address(&treasury, &usdc_mint);
 
     let ix = state.solana.ix_resolve_by_arbitrator(
         &initiator,
         wager.wager_id as u64,
-        &winner,
+        &usdc_mint,
+        &winner_token_account,
+        &treasury_token_account,
         &resolver,
-        &treasury,
     );
 
     let tx_b64 = state.solana
@@ -659,9 +713,15 @@ pub async fn consent_wager(
     let declared_winner = Pubkey::from_str(&req.declared_winner)
         .map_err(|_| bad_request("Invalid declared_winner pubkey"))?;
 
-    // Read the treasury from on-chain ProtocolConfig
+    // Read the treasury and USDC mint from on-chain ProtocolConfig
     let treasury = state.solana.get_treasury().await
         .map_err(|e| internal_error(format!("Failed to read treasury: {}", e)))?;
+    let usdc_mint = state.solana.get_usdc_mint().await
+        .map_err(|e| internal_error(format!("Failed to fetch USDC mint from config: {}", e)))?;
+    
+    // Derive token accounts
+    let winner_token_account = state.solana.get_associated_token_address(&declared_winner, &usdc_mint);
+    let treasury_token_account = state.solana.get_associated_token_address(&treasury, &usdc_mint);
 
     let resolution = wager.resolution_source.to_lowercase();
     let resolver_str = wager.resolver.clone();
@@ -679,9 +739,10 @@ pub async fn consent_wager(
         let ix = state.solana.ix_resolve_by_arbitrator(
             &initiator,
             wager.wager_id as u64,
-            &declared_winner,
+            &usdc_mint,
+            &winner_token_account,
+            &treasury_token_account,
             &participant,  // participant IS the resolver
-            &treasury,
         );
         (ix, format!("Resolve wager #{} — winner: {}", wager.wager_id, req.declared_winner))
     } else {
@@ -689,9 +750,10 @@ pub async fn consent_wager(
         let ix = state.solana.ix_consent_resolve(
             &initiator,
             wager.wager_id as u64,
+            &usdc_mint,
             &participant,
-            &declared_winner,
-            &treasury,
+            &winner_token_account,
+            &treasury_token_account,
         );
         (ix, format!("Consent resolve wager #{} — declared winner: {}", wager.wager_id, req.declared_winner))
     };
