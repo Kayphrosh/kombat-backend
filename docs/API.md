@@ -484,3 +484,324 @@ const signedTx = await wallet.signTransaction(transaction);
 const sig = await connection.sendRawTransaction(signedTx.serialize());
 await connection.confirmTransaction(sig);
 ```
+
+---
+
+## Tournament Betting (Pool Stakes)
+
+Pool-based (parimutuel) betting system for esports tournaments and matches. Odds are determined dynamically based on total stakes in each pool.
+
+### `GET /api/tournaments`
+
+List active tournaments/matches with current odds.
+
+**Query Parameters:**
+
+- `status` (optional): Filter by status (`upcoming`, `live`, `completed`, `cancelled`)
+- `videogame` (optional): Filter by game name
+- `limit` (optional): Max results (default: 20, max: 100)
+- `offset` (optional): Pagination offset
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "id": "a1b2c3d4-...",
+      "pandascore_id": 123456,
+      "name": "Team Liquid vs Cloud9",
+      "videogame_name": "League of Legends",
+      "league_name": "LCS",
+      "series_name": "LCS Spring 2025",
+      "tournament_name": "Regular Season",
+      "scheduled_at": "2025-03-15T18:00:00Z",
+      "status": "upcoming",
+      "pandascore_status": "not_started",
+      "total_pool_usdc": "5000.00",
+      "opponents": [
+        {
+          "id": "opp-uuid-1",
+          "pandascore_id": 1234,
+          "name": "Team Liquid",
+          "image_url": "https://...",
+          "position": 1,
+          "pool_usdc": "3000.00",
+          "implied_odds": 1.67,
+          "percentage": 60.0
+        },
+        {
+          "id": "opp-uuid-2",
+          "pandascore_id": 5678,
+          "name": "Cloud9",
+          "image_url": "https://...",
+          "position": 2,
+          "pool_usdc": "2000.00",
+          "implied_odds": 2.5,
+          "percentage": 40.0
+        }
+      ]
+    }
+  ]
+}
+```
+
+### `POST /api/tournaments`
+
+Create or update a match from PandaScore data. Frontend fetches from PandaScore API and pushes here.
+
+**Request:**
+
+```json
+{
+  "pandascore_id": 123456,
+  "name": "Team Liquid vs Cloud9",
+  "videogame_name": "League of Legends",
+  "videogame_slug": "league-of-legends",
+  "league_name": "LCS",
+  "league_id": 100,
+  "series_name": "LCS Spring 2025",
+  "series_id": 200,
+  "tournament_name": "Regular Season",
+  "tournament_id": 300,
+  "status": "not_started",
+  "scheduled_at": "2025-03-15T18:00:00Z",
+  "opponents": [
+    {
+      "pandascore_id": 1234,
+      "name": "Team Liquid",
+      "image_url": "https://cdn.pandascore.co/images/team/...",
+      "position": 1,
+      "opponent_type": "Team"
+    },
+    {
+      "pandascore_id": 5678,
+      "name": "Cloud9",
+      "image_url": "https://cdn.pandascore.co/images/team/...",
+      "position": 2,
+      "opponent_type": "Team"
+    }
+  ]
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "id": "a1b2c3d4-...",
+    "pandascore_id": 123456,
+    "name": "Team Liquid vs Cloud9",
+    ...
+  }
+}
+```
+
+### `GET /api/tournaments/:id`
+
+Get a single tournament/match with current odds.
+
+**Response:** Same structure as items in list response.
+
+### `POST /api/tournaments/:id/stake`
+
+Place a stake on an opponent. Requires authentication.
+
+**Request:**
+
+```json
+{
+  "opponent_id": "opp-uuid-1",
+  "amount_usdc": "100.00",
+  "user_wallet": "8AVLybVb..."
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "stake_id": "stake-uuid",
+    "odds_at_stake": 1.67,
+    "potential_payout": "167.00",
+    "message": "Stake placed successfully"
+  }
+}
+```
+
+### `POST /api/tournaments/:id/calculate`
+
+Calculate potential payout without placing stake.
+
+**Request:**
+
+```json
+{
+  "opponent_id": "opp-uuid-1",
+  "amount_usdc": "100.00"
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "stake_amount": "100.00",
+    "opponent_pool_before": "3000.00",
+    "opponent_pool_after": "3100.00",
+    "total_pool_after": "5100.00",
+    "odds_if_staked": 1.645,
+    "potential_payout": "164.52",
+    "potential_profit": "64.52"
+  }
+}
+```
+
+### `GET /api/tournaments/:id/stakes`
+
+Get all stakes for a match (returns match with odds including stakes info).
+
+### `POST /api/tournaments/:id/resolve`
+
+Resolve match with a winner. Marks winning stakes and calculates payouts.
+
+**Request:**
+
+```json
+{
+  "winner_opponent_id": "opp-uuid-1"
+}
+```
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "total_pool": "5000.00",
+    "winner_pool": "3000.00",
+    "total_payouts": "5000.00",
+    "winners_count": 15,
+    "losers_count": 10
+  }
+}
+```
+
+### `POST /api/tournaments/:id/cancel`
+
+Cancel match and refund all stakes.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "message": "Match cancelled and all stakes refunded"
+  }
+}
+```
+
+### `POST /api/tournaments/:id/sync`
+
+Sync match status from PandaScore.
+
+**Request:**
+
+```json
+{
+  "pandascore_status": "finished",
+  "winner_pandascore_id": 1234
+}
+```
+
+### `GET /api/users/:wallet/stakes`
+
+Get user's stake history.
+
+**Query Parameters:**
+
+- `status` (optional): `active`, `won`, `lost`, `refunded`
+- `match_id` (optional): Filter by specific match
+- `limit` (optional): Max results (default: 20)
+- `offset` (optional): Pagination offset
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "stake": {
+        "id": "stake-uuid",
+        "match_id": "match-uuid",
+        "opponent_id": "opp-uuid",
+        "user_wallet": "8AVLybVb...",
+        "amount_usdc": "100.00",
+        "odds_at_stake": 1.67,
+        "status": "won",
+        "payout_usdc": "167.00",
+        "created_at": "2025-03-15T17:30:00Z"
+      },
+      "match_name": "Team Liquid vs Cloud9",
+      "match_status": "completed",
+      "opponent_name": "Team Liquid",
+      "opponent_image_url": "https://...",
+      "videogame_name": "League of Legends",
+      "scheduled_at": "2025-03-15T18:00:00Z"
+    }
+  ]
+}
+```
+
+### `GET /api/users/:wallet/stake-stats`
+
+Get aggregated stake statistics for a user.
+
+**Response:**
+
+```json
+{
+  "success": true,
+  "data": {
+    "active_stakes": 3,
+    "total_stakes": 25,
+    "total_staked_usdc": "2500.00",
+    "total_won_usdc": "1850.00",
+    "total_lost_usdc": "500.00",
+    "win_rate": 0.72
+  }
+}
+```
+
+---
+
+### Odds Calculation Formula
+
+**Parimutuel System:**
+
+- `implied_odds = total_pool / opponent_pool`
+- `potential_payout = stake_amount × implied_odds`
+- `percentage = (opponent_pool / total_pool) × 100`
+
+**Example:**
+
+- Total Pool: $5,000
+- Team A Pool: $3,000 (60%)
+- Team B Pool: $2,000 (40%)
+- Bet $100 on Team B → Payout = $100 × ($5,000 / $2,000) = $250
+
+**Edge Cases:**
+
+- Empty pool: Minimum odds of 2.0x guaranteed
+- One-sided pools: Refund option if < 5% on any side
+- Match cancelled: Full refund to all stakers

@@ -1,11 +1,12 @@
 #[cfg(test)]
 mod tests {
     use super::super::auth::verify_ed25519_signature;
+    use solana_sdk::signer::Signer;
 
     #[test]
     fn test_verify_ed25519_signature() {
         // Generate a Solana keypair and sign a message
-        let kp = solana_sdk::signer::keypair::Keypair::new();
+        let kp = solana_sdk::signature::Keypair::new();
         let msg = b"test-nonce-123";
         let sig = kp.sign_message(msg);
         let pubkey_bs58 = kp.pubkey().to_string();

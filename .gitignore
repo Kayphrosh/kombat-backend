@@ -9,7 +9,5 @@ node_modules/
 dist/
 .idea/
 .vscode/
-FRONTEND_INTEGRATION.md
-GCP_DEPLOYMENT.md
-DEPLOYMENT.md
-API.md
+platform-signer.json
+*.md

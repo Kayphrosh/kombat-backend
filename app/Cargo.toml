@@ -20,7 +20,10 @@ uuid = { version = "1.7", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Database — Postgres only
-sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "uuid", "chrono", "macros"] }
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "uuid", "chrono", "macros", "rust_decimal"] }
+
+# Decimal type for precise financial calculations
+rust_decimal = { version = "1.33", features = ["serde"] }
 
 # Solana 2.x (uses curve25519-dalek v4 which is compatible with modern zeroize)
 solana-sdk = "2"

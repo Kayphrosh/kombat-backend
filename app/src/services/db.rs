@@ -566,4 +566,751 @@ impl DbService {
         .await?;
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // TOURNAMENT / MATCH BETTING (Pool Staking)
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // ── Match CRUD ──────────────────────────────────────────────────────────────
+
+    /// Create or update a match from PandaScore data
+    pub async fn upsert_match(&self, req: &crate::models::CreateMatchRequest) -> Result<crate::models::MatchRecord> {
+        // Parse optional timestamps
+        let scheduled_at = req.scheduled_at.as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc));
+        let begin_at = req.begin_at.as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc));
+        let end_at = req.end_at.as_ref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&chrono::Utc));
+
+        let pandascore_status = req.pandascore_status.clone().unwrap_or_else(|| "not_started".to_string());
+        
+        // Determine our internal status based on PandaScore status
+        let status = match pandascore_status.as_str() {
+            "not_started" => "upcoming",
+            "running" => "live",
+            "finished" => "completed",
+            "canceled" => "cancelled",
+            "postponed" => "upcoming", // Keep as upcoming but track postponed
+            _ => "upcoming",
+        };
+
+        let row = sqlx::query_as::<_, crate::models::MatchRecord>(
+            r#"INSERT INTO matches (
+                pandascore_id, slug, name,
+                videogame_id, videogame_name, videogame_slug,
+                league_id, league_name, league_slug, league_image_url,
+                series_id, series_name, series_full_name,
+                tournament_id, tournament_name, tournament_slug,
+                scheduled_at, begin_at, end_at,
+                match_type, number_of_games,
+                pandascore_status, status,
+                streams_list, raw_data
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                $11, $12, $13, $14, $15, $16, $17, $18, $19,
+                $20, $21, $22, $23, $24, $25
+            )
+            ON CONFLICT (pandascore_id) DO UPDATE SET
+                name = EXCLUDED.name,
+                scheduled_at = EXCLUDED.scheduled_at,
+                begin_at = EXCLUDED.begin_at,
+                end_at = EXCLUDED.end_at,
+                pandascore_status = EXCLUDED.pandascore_status,
+                status = CASE 
+                    WHEN matches.status = 'completed' THEN matches.status
+                    WHEN matches.status = 'cancelled' THEN matches.status
+                    ELSE EXCLUDED.status
+                END,
+                streams_list = EXCLUDED.streams_list,
+                raw_data = EXCLUDED.raw_data,
+                updated_at = NOW()
+            RETURNING *"#,
+        )
+        .bind(req.pandascore_id)
+        .bind(&req.slug)
+        .bind(&req.name)
+        .bind(req.videogame_id)
+        .bind(&req.videogame_name)
+        .bind(&req.videogame_slug)
+        .bind(req.league_id)
+        .bind(&req.league_name)
+        .bind(&req.league_slug)
+        .bind(&req.league_image_url)
+        .bind(req.series_id)
+        .bind(&req.series_name)
+        .bind(&req.series_full_name)
+        .bind(req.tournament_id)
+        .bind(&req.tournament_name)
+        .bind(&req.tournament_slug)
+        .bind(scheduled_at)
+        .bind(begin_at)
+        .bind(end_at)
+        .bind(&req.match_type)
+        .bind(req.number_of_games)
+        .bind(&pandascore_status)
+        .bind(status)
+        .bind(&req.streams_list)
+        .bind(&req.raw_data)
+        .fetch_one(&self.pool)
+        .await?;
+
+        // Upsert opponents
+        for (i, opponent) in req.opponents.iter().enumerate() {
+            self.upsert_match_opponent(row.id, opponent, i as i16).await?;
+        }
+
+        Ok(row)
+    }
+
+    /// Upsert a match opponent
+    async fn upsert_match_opponent(
+        &self,
+        match_id: uuid::Uuid,
+        opponent: &crate::models::CreateOpponentRequest,
+        position: i16,
+    ) -> Result<crate::models::MatchOpponentRecord> {
+        let row = sqlx::query_as::<_, crate::models::MatchOpponentRecord>(
+            r#"INSERT INTO match_opponents (
+                match_id, pandascore_id, opponent_type, name, acronym, image_url, location, position
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+            ON CONFLICT (match_id, position) DO UPDATE SET
+                pandascore_id = EXCLUDED.pandascore_id,
+                name = EXCLUDED.name,
+                acronym = EXCLUDED.acronym,
+                image_url = EXCLUDED.image_url,
+                location = EXCLUDED.location
+            RETURNING *"#,
+        )
+        .bind(match_id)
+        .bind(opponent.pandascore_id)
+        .bind(&opponent.opponent_type)
+        .bind(&opponent.name)
+        .bind(&opponent.acronym)
+        .bind(&opponent.image_url)
+        .bind(&opponent.location)
+        .bind(position)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Get a match by ID with pool statistics
+    pub async fn get_match_with_odds(&self, match_id: &str) -> Result<Option<crate::models::MatchWithOdds>> {
+        let match_uuid = uuid::Uuid::parse_str(match_id)
+            .map_err(|e| anyhow::anyhow!("Invalid match ID: {}", e))?;
+
+        let match_record = sqlx::query_as::<_, crate::models::MatchRecord>(
+            "SELECT * FROM matches WHERE id = $1"
+        )
+        .bind(match_uuid)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let match_record = match match_record {
+            Some(m) => m,
+            None => return Ok(None),
+        };
+
+        // Get opponents with pool stats
+        let opponents = self.get_opponents_with_pools(match_uuid).await?;
+
+        let total_pool_usdc: i64 = opponents.iter().map(|o| o.pool_usdc).sum();
+        let total_stakers: i64 = opponents.iter().map(|o| o.staker_count).sum();
+
+        Ok(Some(crate::models::MatchWithOdds {
+            match_info: match_record,
+            opponents,
+            total_pool_usdc,
+            total_stakers,
+        }))
+    }
+
+    /// Get a match by PandaScore ID
+    pub async fn get_match_by_pandascore_id(&self, pandascore_id: i64) -> Result<Option<crate::models::MatchRecord>> {
+        let row = sqlx::query_as::<_, crate::models::MatchRecord>(
+            "SELECT * FROM matches WHERE pandascore_id = $1"
+        )
+        .bind(pandascore_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Get opponents with pool statistics (single query with aggregates)
+    async fn get_opponents_with_pools(&self, match_id: uuid::Uuid) -> Result<Vec<crate::models::OpponentWithPool>> {
+        // Single query: get opponents with their pool stats via LEFT JOIN aggregate
+        let rows: Vec<crate::models::OpponentWithPoolRow> = sqlx::query_as(
+            r#"SELECT
+                mo.*,
+                COALESCE(s.pool_usdc, 0)::BIGINT AS pool_usdc,
+                COALESCE(s.staker_count, 0)::BIGINT AS staker_count,
+                COALESCE(tp.total_pool, 0)::BIGINT AS total_pool
+            FROM match_opponents mo
+            LEFT JOIN (
+                SELECT opponent_id,
+                       SUM(amount_usdc) AS pool_usdc,
+                       COUNT(DISTINCT user_wallet) AS staker_count
+                FROM pool_stakes
+                WHERE status = 'active'
+                GROUP BY opponent_id
+            ) s ON s.opponent_id = mo.id
+            CROSS JOIN (
+                SELECT COALESCE(SUM(amount_usdc), 0) AS total_pool
+                FROM pool_stakes
+                WHERE match_id = $1 AND status = 'active'
+            ) tp
+            WHERE mo.match_id = $1
+            ORDER BY mo.position"#,
+        )
+        .bind(match_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let result = rows.into_iter().map(|row| {
+            let pool_usdc = row.pool_usdc;
+            let staker_count = row.staker_count;
+            let total_pool = row.total_pool;
+
+            let pool_percentage = if total_pool > 0 {
+                (pool_usdc as f64 / total_pool as f64) * 100.0
+            } else {
+                50.0
+            };
+
+            let odds = if pool_usdc > 0 {
+                (total_pool as f64 / pool_usdc as f64).min(9999.0)
+            } else if total_pool > 0 {
+                9999.0
+            } else {
+                1.0
+            };
+
+            crate::models::OpponentWithPool {
+                opponent: row.into_opponent_record(),
+                pool_usdc,
+                pool_percentage,
+                odds,
+                staker_count,
+            }
+        }).collect();
+
+        Ok(result)
+    }
+
+    /// List matches with filtering
+    pub async fn list_matches(&self, query: &crate::models::MatchListQuery) -> Result<Vec<crate::models::MatchWithOdds>> {
+        let limit = query.limit.unwrap_or(20).min(100);
+        let offset = query.offset.unwrap_or(0);
+
+        let mut qb = sqlx::QueryBuilder::new("SELECT * FROM matches WHERE 1=1");
+
+        if let Some(ref status) = query.status {
+            qb.push(" AND status = ").push_bind(status.clone());
+        }
+
+        if let Some(ref vg) = query.videogame {
+            qb.push(" AND videogame_slug = ").push_bind(vg.clone());
+        }
+
+        if let Some(league_id) = query.league_id {
+            qb.push(" AND league_id = ").push_bind(league_id);
+        }
+
+        if let Some(ref search) = query.search {
+            let escaped = search.replace('\\', "\\\\").replace('%', "\\%").replace('_', "\\_");
+            qb.push(" AND name ILIKE ").push_bind(format!("%{}%", escaped));
+        }
+
+        qb.push(" ORDER BY scheduled_at ASC NULLS LAST LIMIT ")
+          .push_bind(limit)
+          .push(" OFFSET ")
+          .push_bind(offset);
+
+        let matches = qb
+            .build_query_as::<crate::models::MatchRecord>()
+            .fetch_all(&self.pool)
+            .await?;
+
+        let mut result = Vec::with_capacity(matches.len());
+        for m in matches {
+            let opponents = self.get_opponents_with_pools(m.id).await?;
+            let total_pool_usdc: i64 = opponents.iter().map(|o| o.pool_usdc).sum();
+            let total_stakers: i64 = opponents.iter().map(|o| o.staker_count).sum();
+
+            result.push(crate::models::MatchWithOdds {
+                match_info: m,
+                opponents,
+                total_pool_usdc,
+                total_stakers,
+            });
+        }
+
+        Ok(result)
+    }
+
+    // ── Pool Stakes ────────────────────────────────────────────────────────────
+
+    /// Place a stake on a match outcome
+    pub async fn place_stake(
+        &self,
+        match_id: &str,
+        opponent_id: &str,
+        user_wallet: &str,
+        amount_usdc: i64,
+    ) -> Result<crate::models::PoolStakeRecord> {
+        let match_uuid = uuid::Uuid::parse_str(match_id)
+            .map_err(|e| anyhow::anyhow!("Invalid match ID: {}", e))?;
+        let opponent_uuid = uuid::Uuid::parse_str(opponent_id)
+            .map_err(|e| anyhow::anyhow!("Invalid opponent ID: {}", e))?;
+
+        // Verify match exists and is accepting stakes
+        let match_record = sqlx::query_as::<_, crate::models::MatchRecord>(
+            "SELECT * FROM matches WHERE id = $1"
+        )
+        .bind(match_uuid)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Match not found"))?;
+
+        if match_record.status != "upcoming" {
+            anyhow::bail!("Match is not accepting stakes (status: {})", match_record.status);
+        }
+
+        // Verify opponent belongs to this match
+        let opponent = sqlx::query_as::<_, crate::models::MatchOpponentRecord>(
+            "SELECT * FROM match_opponents WHERE id = $1 AND match_id = $2"
+        )
+        .bind(opponent_uuid)
+        .bind(match_uuid)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Opponent not found for this match"))?;
+
+        // Calculate current odds with two simple queries instead of full opponent stats
+        let total_pool: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_usdc), 0)::BIGINT FROM pool_stakes WHERE match_id = $1 AND status = 'active'"
+        )
+        .bind(match_uuid)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let opponent_pool: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_usdc), 0)::BIGINT FROM pool_stakes WHERE opponent_id = $1 AND status = 'active'"
+        )
+        .bind(opponent_uuid)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let current_odds = if opponent_pool > 0 {
+            (total_pool as f64 / opponent_pool as f64).min(9999.0)
+        } else if total_pool > 0 {
+            9999.0
+        } else {
+            1.0
+        };
+
+        // Insert stake
+        let row = sqlx::query_as::<_, crate::models::PoolStakeRecord>(
+            r#"INSERT INTO pool_stakes (
+                match_id, opponent_id, user_wallet, amount_usdc, odds_at_stake, status
+            ) VALUES ($1, $2, $3, $4, $5, 'active')
+            RETURNING *"#,
+        )
+        .bind(match_uuid)
+        .bind(opponent_uuid)
+        .bind(user_wallet)
+        .bind(amount_usdc)
+        .bind(rust_decimal::Decimal::from_f64_retain(current_odds))
+        .fetch_one(&self.pool)
+        .await?;
+
+        tracing::info!(
+            "Stake placed: {} staked {} on {} for match {}",
+            user_wallet, amount_usdc, opponent.name, match_record.name
+        );
+
+        Ok(row)
+    }
+
+    /// Calculate potential payout for a stake
+    pub async fn calculate_payout(
+        &self,
+        match_id: &str,
+        opponent_id: &str,
+        amount_usdc: i64,
+    ) -> Result<crate::models::PayoutCalculation> {
+        let match_uuid = uuid::Uuid::parse_str(match_id)
+            .map_err(|e| anyhow::anyhow!("Invalid match ID: {}", e))?;
+        let opponent_uuid = uuid::Uuid::parse_str(opponent_id)
+            .map_err(|e| anyhow::anyhow!("Invalid opponent ID: {}", e))?;
+
+        // Get current pool totals
+        let total_pool: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_usdc), 0)::BIGINT FROM pool_stakes WHERE match_id = $1 AND status = 'active'"
+        )
+        .bind(match_uuid)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let opponent_pool: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_usdc), 0)::BIGINT FROM pool_stakes WHERE opponent_id = $1 AND status = 'active'"
+        )
+        .bind(opponent_uuid)
+        .fetch_one(&self.pool)
+        .await?;
+
+        // Calculate new totals after this stake
+        let new_total = total_pool + amount_usdc;
+        let new_opponent_pool = opponent_pool + amount_usdc;
+
+        // Calculate odds after stake
+        let current_odds = if new_opponent_pool > 0 {
+            new_total as f64 / new_opponent_pool as f64
+        } else {
+            1.0
+        };
+
+        let min_payout = (amount_usdc as f64 * current_odds) as i64;
+        let min_profit = min_payout - amount_usdc;
+        let profit_percentage = if amount_usdc > 0 {
+            (min_profit as f64 / amount_usdc as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        // Check for warning conditions
+        let warning = if total_pool == 0 {
+            Some("You're the first staker! Odds will change as others stake.".to_string())
+        } else if opponent_pool == 0 {
+            Some("No one has staked on this side yet. Odds are very high but may change.".to_string())
+        } else if total_pool - opponent_pool == 0 {
+            Some("No opposition yet. Your stake may be refunded if no one bets on the other side.".to_string())
+        } else {
+            None
+        };
+
+        Ok(crate::models::PayoutCalculation {
+            stake_amount_usdc: amount_usdc,
+            current_odds,
+            min_payout_usdc: min_payout,
+            min_profit_usdc: min_profit,
+            profit_percentage,
+            warning,
+        })
+    }
+
+    /// Resolve a match and process payouts (wrapped in a transaction)
+    pub async fn resolve_match(
+        &self,
+        match_id: &str,
+        winner_opponent_id: &str,
+        pandascore_winner_id: Option<i32>,
+        forfeit: bool,
+    ) -> Result<crate::models::ResolveResult> {
+        use crate::models::{PayoutEntry, ResolveResult};
+
+        let match_uuid = uuid::Uuid::parse_str(match_id)
+            .map_err(|e| anyhow::anyhow!("Invalid match ID: {}", e))?;
+        let winner_uuid = uuid::Uuid::parse_str(winner_opponent_id)
+            .map_err(|e| anyhow::anyhow!("Invalid winner ID: {}", e))?;
+
+        let mut tx = self.pool.begin().await?;
+
+        // Get match
+        let match_record = sqlx::query_as::<_, crate::models::MatchRecord>(
+            "SELECT * FROM matches WHERE id = $1 FOR UPDATE"
+        )
+        .bind(match_uuid)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Match not found"))?;
+
+        if match_record.status == "completed" {
+            anyhow::bail!("Match already resolved");
+        }
+
+        // Get pool totals
+        let total_pool: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_usdc), 0)::BIGINT FROM pool_stakes WHERE match_id = $1 AND status = 'active'"
+        )
+        .bind(match_uuid)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let winner_pool: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_usdc), 0)::BIGINT FROM pool_stakes WHERE opponent_id = $1 AND status = 'active'"
+        )
+        .bind(winner_uuid)
+        .fetch_one(&mut *tx)
+        .await?;
+
+        let loser_pool = total_pool - winner_pool;
+
+        // Check edge cases
+        if total_pool == 0 {
+            // No stakes at all - just mark complete
+            sqlx::query("UPDATE matches SET status = 'completed', winner_id = $2, forfeit = $3, updated_at = NOW() WHERE id = $1")
+                .bind(match_uuid)
+                .bind(pandascore_winner_id)
+                .bind(forfeit)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(ResolveResult::Empty);
+        }
+
+        if loser_pool == 0 || winner_pool == 0 {
+            // One-sided pool - refund everyone
+            let refund_stakes: Vec<crate::models::PoolStakeRecord> = sqlx::query_as(
+                "SELECT * FROM pool_stakes WHERE match_id = $1 AND status = 'active'"
+            )
+            .bind(match_uuid)
+            .fetch_all(&mut *tx)
+            .await?;
+
+            let refunds: Vec<PayoutEntry> = refund_stakes.iter().map(|s| PayoutEntry {
+                stake_id: s.id,
+                user_wallet: s.user_wallet.clone(),
+                amount_usdc: s.amount_usdc,
+            }).collect();
+
+            sqlx::query("UPDATE pool_stakes SET status = 'refunded', resolved_at = NOW() WHERE match_id = $1 AND status = 'active'")
+                .bind(match_uuid)
+                .execute(&mut *tx)
+                .await?;
+
+            sqlx::query("UPDATE matches SET status = 'refunded', winner_id = $2, forfeit = $3, updated_at = NOW() WHERE id = $1")
+                .bind(match_uuid)
+                .bind(pandascore_winner_id)
+                .bind(forfeit)
+                .execute(&mut *tx)
+                .await?;
+
+            tx.commit().await?;
+            tracing::info!("Match {} resolved with refunds (one-sided pool)", match_id);
+            return Ok(ResolveResult::Refunded(refunds));
+        }
+
+        // Calculate payouts for winners using integer arithmetic
+        // Each winner gets: (their_stake * total_pool) / winner_pool
+        // Use i128 to prevent overflow on multiplication
+        let winner_stakes: Vec<crate::models::PoolStakeRecord> = sqlx::query_as(
+            "SELECT * FROM pool_stakes WHERE opponent_id = $1 AND status = 'active'"
+        )
+        .bind(winner_uuid)
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let mut payouts = Vec::new();
+        for stake in winner_stakes {
+            let payout = ((stake.amount_usdc as i128 * total_pool as i128) / winner_pool as i128) as i64;
+            sqlx::query("UPDATE pool_stakes SET status = 'won', payout_usdc = $2, resolved_at = NOW() WHERE id = $1")
+                .bind(stake.id)
+                .bind(payout)
+                .execute(&mut *tx)
+                .await?;
+            payouts.push(PayoutEntry {
+                stake_id: stake.id,
+                user_wallet: stake.user_wallet.clone(),
+                amount_usdc: payout,
+            });
+        }
+
+        // Mark losing stakes
+        sqlx::query("UPDATE pool_stakes SET status = 'lost', payout_usdc = 0, resolved_at = NOW() WHERE match_id = $1 AND opponent_id != $2 AND status = 'active'")
+            .bind(match_uuid)
+            .bind(winner_uuid)
+            .execute(&mut *tx)
+            .await?;
+
+        // Update winner opponent
+        sqlx::query("UPDATE match_opponents SET is_winner = TRUE WHERE id = $1")
+            .bind(winner_uuid)
+            .execute(&mut *tx)
+            .await?;
+
+        sqlx::query("UPDATE match_opponents SET is_winner = FALSE WHERE match_id = $1 AND id != $2")
+            .bind(match_uuid)
+            .bind(winner_uuid)
+            .execute(&mut *tx)
+            .await?;
+
+        // Update match
+        sqlx::query("UPDATE matches SET status = 'completed', winner_id = $2, forfeit = $3, pandascore_status = 'finished', updated_at = NOW() WHERE id = $1")
+            .bind(match_uuid)
+            .bind(pandascore_winner_id)
+            .bind(forfeit)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+
+        tracing::info!(
+            "Match {} resolved: winner pool {}, loser pool {}, total {}",
+            match_id, winner_pool, loser_pool, total_pool
+        );
+
+        Ok(ResolveResult::Resolved(payouts))
+    }
+
+    /// Cancel a match and refund all stakes. Returns the list of refund entries
+    /// for on-chain settlement.
+    pub async fn cancel_match(&self, match_id: &str) -> Result<Vec<crate::models::PayoutEntry>> {
+        let match_uuid = uuid::Uuid::parse_str(match_id)
+            .map_err(|e| anyhow::anyhow!("Invalid match ID: {}", e))?;
+
+        // Fetch active stakes before updating
+        let stakes: Vec<crate::models::PoolStakeRecord> = sqlx::query_as(
+            "SELECT * FROM pool_stakes WHERE match_id = $1 AND status = 'active'"
+        )
+        .bind(match_uuid)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let refunds: Vec<crate::models::PayoutEntry> = stakes.iter().map(|s| crate::models::PayoutEntry {
+            stake_id: s.id,
+            user_wallet: s.user_wallet.clone(),
+            amount_usdc: s.amount_usdc,
+        }).collect();
+
+        sqlx::query("UPDATE pool_stakes SET status = 'refunded', resolved_at = NOW() WHERE match_id = $1 AND status = 'active'")
+            .bind(match_uuid)
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("UPDATE matches SET status = 'cancelled', pandascore_status = 'canceled', updated_at = NOW() WHERE id = $1")
+            .bind(match_uuid)
+            .execute(&self.pool)
+            .await?;
+
+        tracing::info!("Match {} cancelled, {} stakes refunded", match_id, refunds.len());
+        Ok(refunds)
+    }
+
+    /// Record on-chain payout/refund tx hash for a stake
+    pub async fn set_payout_tx_hash(&self, stake_id: uuid::Uuid, tx_hash: &str) -> Result<()> {
+        sqlx::query("UPDATE pool_stakes SET payout_tx_hash = $2 WHERE id = $1")
+            .bind(stake_id)
+            .bind(tx_hash)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// Get user's stakes (single JOIN query)
+    pub async fn get_user_stakes(
+        &self,
+        wallet: &str,
+        query: &crate::models::StakeListQuery,
+    ) -> Result<Vec<crate::models::StakeWithMatch>> {
+        let limit = query.limit.unwrap_or(20).min(100);
+        let offset = query.offset.unwrap_or(0);
+
+        let rows: Vec<crate::models::StakeWithMatchRow> = sqlx::query_as(
+            r#"SELECT
+                ps.*,
+                m.name AS match_name,
+                m.status AS match_status,
+                mo.name AS opponent_name,
+                mo.image_url AS opponent_image_url,
+                m.videogame_name,
+                m.scheduled_at
+            FROM pool_stakes ps
+            JOIN matches m ON m.id = ps.match_id
+            JOIN match_opponents mo ON mo.id = ps.opponent_id
+            WHERE ps.user_wallet = $1
+            ORDER BY ps.created_at DESC
+            LIMIT $2 OFFSET $3"#,
+        )
+        .bind(wallet)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
+        let result = rows.into_iter().map(|row| row.into_stake_with_match()).collect();
+        Ok(result)
+    }
+
+    /// Get user's stake stats
+    pub async fn get_user_stake_stats(&self, wallet: &str) -> Result<crate::models::UserStakeStats> {
+        let active_stakes: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM pool_stakes WHERE user_wallet = $1 AND status = 'active'"
+        )
+        .bind(wallet)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let total_staked: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_usdc), 0)::BIGINT FROM pool_stakes WHERE user_wallet = $1"
+        )
+        .bind(wallet)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let total_won: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(payout_usdc), 0)::BIGINT FROM pool_stakes WHERE user_wallet = $1 AND status = 'won'"
+        )
+        .bind(wallet)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let total_lost: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_usdc), 0)::BIGINT FROM pool_stakes WHERE user_wallet = $1 AND status = 'lost'"
+        )
+        .bind(wallet)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let win_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM pool_stakes WHERE user_wallet = $1 AND status = 'won'"
+        )
+        .bind(wallet)
+        .fetch_one(&self.pool)
+        .await?;
+
+        let loss_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::BIGINT FROM pool_stakes WHERE user_wallet = $1 AND status = 'lost'"
+        )
+        .bind(wallet)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(crate::models::UserStakeStats {
+            active_stakes,
+            total_staked_usdc: total_staked,
+            total_won_usdc: total_won,
+            total_lost_usdc: total_lost,
+            win_count,
+            loss_count,
+        })
+    }
+
+    /// Update match status (for syncing with PandaScore)
+    pub async fn update_match_status(&self, match_id: &str, pandascore_status: &str) -> Result<()> {
+        let match_uuid = uuid::Uuid::parse_str(match_id)
+            .map_err(|e| anyhow::anyhow!("Invalid match ID: {}", e))?;
+
+        let status = match pandascore_status {
+            "not_started" => "upcoming",
+            "running" => "live",
+            "finished" => "completed",
+            "canceled" => "cancelled",
+            "postponed" => "upcoming",
+            _ => "upcoming",
+        };
+
+        sqlx::query("UPDATE matches SET pandascore_status = $2, status = $3, updated_at = NOW() WHERE id = $1")
+            .bind(match_uuid)
+            .bind(pandascore_status)
+            .bind(status)
+            .execute(&self.pool)
+            .await?;
+
+        Ok(())
+    }
 }
