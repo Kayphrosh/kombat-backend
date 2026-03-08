@@ -81,20 +81,33 @@ pub async fn get_nonce(
     // Rate limiting: prefer Redis-backed limiter when available (cross-instance).
     let max = 5u32;
     let window_secs = 60usize;
+    let mut used_redis = false;
     if let Some(redis_client) = &state.redis_client {
-        // Use redis INCR with expiry; create a connection manager per request
-        let mut conn = redis_client.get_tokio_connection_manager().await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(crate::models::ApiResponse::err(format!("redis conn error: {}", e)))))?;
-        let key = format!("nonce_rl:{}", wallet);
-        let cnt = redis_svc::incr_with_expiry(&mut conn, &key, window_secs).await
-            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(crate::models::ApiResponse::err(e.to_string()))))?;
-        if cnt > max as u64 {
-            if let Some(c) = &state.rate_limit_exceeded {
-                c.inc();
+        // Try Redis, but fall back to in-memory if unavailable
+        match redis_client.get_tokio_connection_manager().await {
+            Ok(mut conn) => {
+                let key = format!("nonce_rl:{}", wallet);
+                match redis_svc::incr_with_expiry(&mut conn, &key, window_secs).await {
+                    Ok(cnt) => {
+                        used_redis = true;
+                        if cnt > max as u64 {
+                            if let Some(c) = &state.rate_limit_exceeded {
+                                c.inc();
+                            }
+                            return Err((StatusCode::TOO_MANY_REQUESTS, Json(crate::models::ApiResponse::err("rate limit exceeded"))));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Redis rate-limit incr failed, falling back to in-memory: {e}");
+                    }
+                }
             }
-            return Err((StatusCode::TOO_MANY_REQUESTS, Json(crate::models::ApiResponse::err("rate limit exceeded"))));
+            Err(e) => {
+                tracing::warn!("Redis connection failed, falling back to in-memory rate limiter: {e}");
+            }
         }
-    } else {
+    }
+    if !used_redis {
         let window = chrono::Duration::seconds(window_secs as i64);
         {
             let mut map = state.nonce_rate.lock().await;
