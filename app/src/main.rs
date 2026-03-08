@@ -128,26 +128,6 @@ async fn main() -> anyhow::Result<()> {
     let _ = prometheus::default_registry().register(Box::new(rl_exceeded.clone()));
     let _ = prometheus::default_registry().register(Box::new(rl_requests.clone()));
 
-    // ── Delegation service (optional) ────────────────────────────────────────
-    let delegation = match std::env::var("PLATFORM_SIGNER_KEYPAIR") {
-        Ok(keypair_json) => {
-            match services::delegation::DelegationService::from_json_keypair(&keypair_json) {
-                Ok(svc) => {
-                    tracing::info!("Delegation service enabled (platform signer loaded)");
-                    Some(Arc::new(svc))
-                }
-                Err(e) => {
-                    tracing::error!("Failed to initialise delegation service: {e}");
-                    None
-                }
-            }
-        }
-        Err(_) => {
-            tracing::info!("PLATFORM_SIGNER_KEYPAIR not set — delegation disabled");
-            None
-        }
-    };
-
     let state = Arc::new(AppState {
         db,
         solana,
@@ -158,7 +138,6 @@ async fn main() -> anyhow::Result<()> {
         rate_limit_requests: Some(std::sync::Arc::new(rl_requests)),
         dynamic_service,
         upload_service,
-        delegation,
     });
 
     // ── CORS ──────────────────────────────────────────────────────────────────
@@ -233,11 +212,6 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/tournaments/:id/sync",             post(sync_tournament))
         .route("/api/users/:wallet/stakes",             get(get_user_stakes))
         .route("/api/users/:wallet/stake-stats",        get(get_user_stake_stats))
-
-        // ── Delegation (SPL Token approve/revoke) ────────────────────────────
-        .route("/api/delegation/approve-tx",   get(handlers::delegation::get_approve_tx))
-        .route("/api/delegation/revoke-tx",    get(handlers::delegation::get_revoke_tx))
-        .route("/api/delegation/status",       get(handlers::delegation::get_delegation_status))
 
         // ── WebSocket ────────────────────────────────────────────────────────
         .route("/ws/notifications/:wallet", get(ws_notifications))

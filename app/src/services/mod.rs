@@ -11,9 +11,7 @@ pub mod redis;
 pub mod dynamic;
 pub mod upload;
 pub mod push;
-pub mod delegation;
-#[cfg(test)]
-mod delegation_tests;
+
 
 pub use db::DbService;
 pub use solana::SolanaService;

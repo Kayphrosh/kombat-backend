@@ -33,71 +33,6 @@ fn unauthorized(msg: impl Into<String>) -> (StatusCode, Json<ApiResponse<()>>) {
     (StatusCode::UNAUTHORIZED, Json(ApiResponse::err(msg)))
 }
 
-/// Send on-chain payouts/refunds from the pool vault to user wallets.
-/// Best-effort: logs failures but doesn't block the DB resolution.
-async fn settle_payouts_on_chain(
-    state: &Arc<AppState>,
-    entries: &[crate::models::PayoutEntry],
-) {
-    let delegation = match state.delegation.as_ref() {
-        Some(d) => d,
-        None => return, // delegation not enabled — skip on-chain settlement
-    };
-
-    let usdc_mint = match state.solana.get_usdc_mint().await {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::error!("Failed to get USDC mint for payouts: {e}");
-            return;
-        }
-    };
-
-    let vault_ata = state.solana.get_associated_token_address(&delegation.pubkey(), &usdc_mint);
-
-    for entry in entries {
-        let wallet_pubkey = match solana_sdk::pubkey::Pubkey::from_str(&entry.user_wallet) {
-            Ok(pk) => pk,
-            Err(e) => {
-                tracing::error!("Invalid wallet {} for payout: {e}", entry.user_wallet);
-                continue;
-            }
-        };
-
-        let user_ata = state.solana.get_associated_token_address(&wallet_pubkey, &usdc_mint);
-
-        let blockhash = match state.solana.rpc.get_latest_blockhash().await {
-            Ok(bh) => bh,
-            Err(e) => {
-                tracing::error!("RPC blockhash error for payout to {}: {e}", entry.user_wallet);
-                continue;
-            }
-        };
-
-        let tx = match delegation.build_payout_transfer(
-            &vault_ata,
-            &user_ata,
-            entry.amount_usdc as u64,
-            blockhash,
-        ) {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::error!("Failed to build payout tx for {}: {e}", entry.user_wallet);
-                continue;
-            }
-        };
-
-        match state.solana.rpc.send_and_confirm_transaction(&tx).await {
-            Ok(sig) => {
-                tracing::info!("Payout {} USDC to {} — tx {}", entry.amount_usdc, entry.user_wallet, sig);
-                let _ = state.db.set_payout_tx_hash(entry.stake_id, &sig.to_string()).await;
-            }
-            Err(e) => {
-                tracing::error!("Payout tx failed for {} ({} USDC): {e}", entry.user_wallet, entry.amount_usdc);
-            }
-        }
-    }
-}
-
 /// Extract wallet from JWT in Authorization header
 fn extract_wallet_from_jwt(headers: &HeaderMap) -> Result<String, (StatusCode, Json<ApiResponse<()>>)> {
     let secret = std::env::var("AUTH_JWT_SECRET")
@@ -221,32 +156,6 @@ pub async fn place_stake(
         return Err(bad_request("Minimum stake is 1 USDC"));
     }
 
-    // ── On-chain delegated transfer (if delegation enabled) ──────────────
-    if let Some(ref delegation) = state.delegation {
-        let wallet_pubkey = solana_sdk::pubkey::Pubkey::from_str(&req.user_wallet)
-            .map_err(|_| bad_request("Invalid wallet address"))?;
-
-        let usdc_mint = state.solana.get_usdc_mint().await
-            .map_err(|e| internal_error(format!("Failed to get USDC mint: {e}")))?;
-
-        let user_ata = state.solana.get_associated_token_address(&wallet_pubkey, &usdc_mint);
-        // Pool vault = platform signer's own ATA (signer is the owner, can pay out later)
-        let vault_ata = state.solana.get_associated_token_address(&delegation.pubkey(), &usdc_mint);
-
-        let blockhash = state.solana.rpc.get_latest_blockhash().await
-            .map_err(|e| internal_error(format!("RPC error: {e}")))?;
-
-        let tx = delegation.build_delegated_transfer(
-            &user_ata,
-            &vault_ata,
-            req.amount_usdc as u64,
-            blockhash,
-        ).map_err(|e| internal_error(format!("Failed to build transfer: {e}")))?;
-
-        state.solana.rpc.send_and_confirm_transaction(&tx).await
-            .map_err(|e| bad_request(format!("On-chain transfer failed: {e}")))?;
-    }
-
     let stake = state.db.place_stake(
         &match_id,
         &req.opponent_id,
@@ -328,14 +237,10 @@ pub async fn resolve_tournament(
         req.forfeit.unwrap_or(false),
     ).await.map_err(|e| bad_request(e.to_string()))?;
 
-    // Send on-chain payouts/refunds
+    // Send on-chain payouts/refunds (placeholder for future on-chain settlement)
     match result {
-        crate::models::ResolveResult::Resolved(ref payouts) => {
-            settle_payouts_on_chain(&state, payouts).await;
-        }
-        crate::models::ResolveResult::Refunded(ref refunds) => {
-            settle_payouts_on_chain(&state, refunds).await;
-        }
+        crate::models::ResolveResult::Resolved(ref _payouts) => {}
+        crate::models::ResolveResult::Refunded(ref _refunds) => {}
         crate::models::ResolveResult::Empty => {}
     }
 
@@ -354,8 +259,7 @@ pub async fn cancel_tournament(
     let refunds = state.db.cancel_match(&match_id).await
         .map_err(|e| bad_request(e.to_string()))?;
 
-    // Send on-chain refunds
-    settle_payouts_on_chain(&state, &refunds).await;
+    // On-chain refunds will be handled separately
 
     Ok(Json(ApiResponse::ok(())))
 }
@@ -390,12 +294,8 @@ pub async fn sync_tournament(
                             forfeit,
                         ).await {
                             match result {
-                                crate::models::ResolveResult::Resolved(ref payouts) => {
-                                    settle_payouts_on_chain(&state, payouts).await;
-                                }
-                                crate::models::ResolveResult::Refunded(ref refunds) => {
-                                    settle_payouts_on_chain(&state, refunds).await;
-                                }
+                                crate::models::ResolveResult::Resolved(ref _payouts) => {}
+                                crate::models::ResolveResult::Refunded(ref _refunds) => {}
                                 crate::models::ResolveResult::Empty => {}
                             }
                         }

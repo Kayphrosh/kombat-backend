@@ -38,8 +38,6 @@ pub struct AppState {
     pub dynamic_service: Option<Arc<crate::services::DynamicService>>,
     // Upload service (optional — only if UPLOAD_DIR is set)
     pub upload_service: Option<Arc<crate::services::UploadService>>,
-    // Delegation service for PIN-based staking (optional — only if PLATFORM_SIGNER_KEYPAIR is set)
-    pub delegation: Option<Arc<crate::services::delegation::DelegationService>>,
 }
 
 type AppResult<T> = Result<Json<ApiResponse<T>>, (StatusCode, Json<ApiResponse<()>>)>;
