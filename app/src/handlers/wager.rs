@@ -496,6 +496,12 @@ pub async fn resolve_wager(
     let winner_token_account = state.solana.get_associated_token_address(&winner, &usdc_mint);
     let treasury_token_account = state.solana.get_associated_token_address(&treasury, &usdc_mint);
 
+    // Ensure winner and treasury ATAs exist — prepend create instructions if missing
+    let ata_ixs = state.solana
+        .ensure_atas_exist(&resolver, &usdc_mint, &[&winner, &treasury])
+        .await
+        .map_err(|e| internal_error(format!("Failed to check ATAs: {}", e)))?;
+
     let ix = state.solana.ix_resolve_by_arbitrator(
         &initiator,
         wager.wager_id as u64,
@@ -505,8 +511,12 @@ pub async fn resolve_wager(
         &resolver,
     );
 
+    // Prepend ATA creation instructions before the main instruction
+    let mut all_ixs = ata_ixs;
+    all_ixs.push(ix);
+
     let tx_b64 = state.solana
-        .build_transaction(vec![ix], &resolver)
+        .build_transaction(all_ixs, &resolver)
         .await
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -725,6 +735,12 @@ pub async fn consent_wager(
     let winner_token_account = state.solana.get_associated_token_address(&declared_winner, &usdc_mint);
     let treasury_token_account = state.solana.get_associated_token_address(&treasury, &usdc_mint);
 
+    // Ensure winner and treasury ATAs exist — prepend create instructions if missing
+    let ata_ixs = state.solana
+        .ensure_atas_exist(&participant, &usdc_mint, &[&declared_winner, &treasury])
+        .await
+        .map_err(|e| internal_error(format!("Failed to check ATAs: {}", e)))?;
+
     let resolution = wager.resolution_source.to_lowercase();
     let resolver_str = wager.resolver.clone();
     let caller_is_resolver = req.participant == resolver_str;
@@ -760,8 +776,12 @@ pub async fn consent_wager(
         (ix, format!("Consent resolve wager #{} — declared winner: {}", wager.wager_id, req.declared_winner))
     };
 
+    // Prepend ATA creation instructions before the main instruction
+    let mut all_ixs = ata_ixs;
+    all_ixs.push(ix);
+
     let tx_b64 = state.solana
-        .build_transaction(vec![ix], &participant)
+        .build_transaction(all_ixs, &participant)
         .await
         .map_err(|e| internal_error(e.to_string()))?;
 

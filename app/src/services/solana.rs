@@ -397,6 +397,65 @@ impl SolanaService {
         }
     }
 
+    /// Check whether an account exists on-chain (i.e. has been initialized).
+    pub async fn account_exists(&self, address: &Pubkey) -> Result<bool> {
+        match self.rpc.get_account(address).await {
+            Ok(_) => Ok(true),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("AccountNotFound") || msg.contains("could not find account") {
+                    Ok(false)
+                } else {
+                    Err(anyhow::anyhow!("RPC error checking account {}: {}", address, msg))
+                }
+            }
+        }
+    }
+
+    /// Build a `create_associated_token_account_idempotent` instruction.
+    /// This is a no-op if the ATA already exists, so it's safe to always include.
+    pub fn ix_create_ata_idempotent(
+        &self,
+        payer: &Pubkey,
+        wallet: &Pubkey,
+        mint: &Pubkey,
+    ) -> Instruction {
+        let ata = self.get_associated_token_address(wallet, mint);
+        // CreateIdempotent instruction tag is index 1 in the ATA program
+        Instruction {
+            program_id: self.associated_token_program_id,
+            accounts: vec![
+                AccountMeta::new(*payer, true),                             // funding account
+                AccountMeta::new(ata, false),                               // associated token account
+                AccountMeta::new_readonly(*wallet, false),                  // wallet owner
+                AccountMeta::new_readonly(*mint, false),                    // token mint
+                AccountMeta::new_readonly(solana_sdk::system_program::id(), false), // system program
+                AccountMeta::new_readonly(self.token_program_id, false),    // token program
+            ],
+            data: vec![1], // 1 = CreateIdempotent
+        }
+    }
+
+    /// Build `create_associated_token_account_idempotent` instructions for any
+    /// ATAs in the provided list that don't yet exist on-chain.
+    /// Returns the instructions to prepend to the transaction.
+    pub async fn ensure_atas_exist(
+        &self,
+        payer: &Pubkey,
+        mint: &Pubkey,
+        owners: &[&Pubkey],
+    ) -> Result<Vec<Instruction>> {
+        let mut ixs = Vec::new();
+        for owner in owners {
+            let ata = self.get_associated_token_address(owner, mint);
+            if !self.account_exists(&ata).await? {
+                tracing::info!("ATA {} for owner {} does not exist — will create", ata, owner);
+                ixs.push(self.ix_create_ata_idempotent(payer, owner, mint));
+            }
+        }
+        Ok(ixs)
+    }
+
     /// Read the treasury pubkey from the on-chain ProtocolConfig PDA.
     /// Layout: 8 (discriminator) + 1 (bump) + 32 (admin) + 32 (treasury)
     pub async fn get_treasury(&self) -> Result<Pubkey> {
