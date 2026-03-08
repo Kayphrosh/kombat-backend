@@ -876,7 +876,7 @@ impl DbService {
         .await?
         .ok_or_else(|| anyhow::anyhow!("Match not found"))?;
 
-        if match_record.status != "upcoming" {
+        if match_record.status != "upcoming" && match_record.status != "live" {
             anyhow::bail!("Match is not accepting stakes (status: {})", match_record.status);
         }
 
