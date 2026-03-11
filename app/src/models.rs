@@ -124,6 +124,15 @@ pub struct UserRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct UserSearchQuery {
+    pub q: Option<String>,
+    pub query: Option<String>,
+    pub username: Option<String>,
+    pub display_name: Option<String>,
+    pub limit: Option<i64>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct UpdateProfileRequest {
     pub email: Option<String>,

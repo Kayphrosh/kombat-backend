@@ -1,6 +1,6 @@
 // app/src/handlers/user.rs
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::{
     handlers::wager::AppState,
-    models::{ApiResponse, UpdateProfileRequest, UserRecord, UserStats, NotificationSettings, UpdateNotificationSettings},
+    models::{ApiResponse, UpdateProfileRequest, UserRecord, UserStats, NotificationSettings, UpdateNotificationSettings, UserSearchQuery},
 };
 
 type AppResult<T> = Result<Json<ApiResponse<T>>, (StatusCode, Json<ApiResponse<()>>)>;
@@ -28,6 +28,30 @@ pub async fn get_user_profile(
 
     let user = user.ok_or_else(|| (StatusCode::NOT_FOUND, Json(ApiResponse::err("User not found"))))?;
     Ok(Json(ApiResponse::ok(user)))
+}
+
+// ─── GET /api/users/search ────────────────────────────────────────────────────
+
+pub async fn search_users(
+    State(state): State<Arc<AppState>>,
+    Query(query_params): Query<UserSearchQuery>,
+) -> AppResult<Vec<UserRecord>> {
+    let query = query_params.query
+        .or(query_params.q)
+        .or(query_params.username)
+        .or(query_params.display_name)
+        .unwrap_or_default();
+
+    if query.trim().is_empty() {
+        return Ok(Json(ApiResponse::ok(vec![])));
+    }
+
+    let limit = query_params.limit.unwrap_or(20).min(50);
+
+    let users = state.db.search_users(&query, limit).await
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    Ok(Json(ApiResponse::ok(users)))
 }
 
 // ─── POST /users/:wallet ──────────────────────────────────────────────────────

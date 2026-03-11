@@ -336,6 +336,23 @@ impl DbService {
         Ok(row)
     }
 
+    pub async fn search_users(&self, query: &str, limit: i64) -> Result<Vec<UserRecord>> {
+        let pattern = format!("%{}%", query);
+        let rows = sqlx::query_as::<_, UserRecord>(
+            r#"SELECT id, wallet_address, email, display_name, avatar_url,
+                      wins, losses, created_at, updated_at
+               FROM users
+               WHERE display_name ILIKE $1 OR wallet_address ILIKE $1
+               ORDER BY display_name ASC NULLS LAST
+               LIMIT $2"#,
+        )
+        .bind(pattern)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows)
+    }
+
     pub async fn upsert_user(
         &self,
         wallet: &str,
