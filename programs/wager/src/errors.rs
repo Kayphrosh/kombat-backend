@@ -10,6 +10,9 @@ pub enum WagerError {
     #[msg("Wager is not in Active status")]
     NotActive,
 
+    #[msg("Wager is not initialized for funding")]
+    NotInitialized,
+
     #[msg("Wager has already been resolved")]
     AlreadyResolved,
 

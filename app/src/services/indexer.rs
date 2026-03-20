@@ -126,7 +126,10 @@ impl IndexerService {
         let state: WagerAccount = BorshDeserialize::deserialize(&mut data_slice)?;
 
         let on_chain_address = wager_pk.to_string();
-        let new_status = format!("{:?}", state.status).to_lowercase();
+        let new_status = match state.status {
+            WagerStatus::Initialized => "setup_pending".to_string(),
+            _ => format!("{:?}", state.status).to_lowercase(),
+        };
         let winner_wallet = state.winner.map(|k| k.to_string());
 
         // Check existing DB record to avoid double-counting wins/losses
@@ -214,6 +217,7 @@ pub enum WagerStatus {
     Cancelled,
     Disputed,
     Expired,
+    Initialized,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug)]

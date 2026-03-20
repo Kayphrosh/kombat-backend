@@ -128,7 +128,8 @@ pub struct CreateWagerArgs {
 }
 
 // ─── POST /wagers ─────────────────────────────────────────────────────────────
-/// Returns an unsigned transaction the client must sign with the initiator's wallet.
+/// Returns the setup transaction the client must sign before requesting the
+/// final funding transaction.
 
 pub async fn create_wager(
     State(state): State<Arc<AppState>>,
@@ -167,7 +168,7 @@ pub async fn create_wager(
         }
         Err(_) => {
             // Registry doesn't exist — prepend an initialize_registry instruction
-            tracing::info!("Registry not found for {}, will auto-initialize", initiator);
+            tracing::info!("Registry not found for {}, will initialize during setup", initiator);
             let init_ix = state.solana.ix_initialize_registry(&initiator);
             instructions.push(init_ix);
             wager_id = 0;
@@ -204,26 +205,22 @@ pub async fn create_wager(
     // Fetch the USDC mint from on-chain config
     let usdc_mint = state.solana.get_usdc_mint().await
         .map_err(|e| internal_error(format!("Failed to fetch USDC mint from config: {}", e)))?;
-    
-    // Derive the initiator's USDC Associated Token Account
-    let initiator_token_account = state.solana.get_associated_token_address(&initiator, &usdc_mint);
 
-    let ix = state.solana.ix_create_wager(
+    let (wager_pda, _) = state.solana.wager_pda(&initiator, wager_id);
+    let setup_ix = state.solana.ix_initialize_wager(
         &initiator,
         wager_id,
-        &usdc_mint,
-        &initiator_token_account,
         args_data,
     );
-    instructions.push(ix);
+    instructions.push(setup_ix);
+    instructions.push(state.solana.ix_create_ata_idempotent(&initiator, &wager_pda, &usdc_mint));
 
     let tx_b64 = state.solana
         .build_transaction(instructions, &initiator)
         .await
         .map_err(|e| internal_error(e.to_string()))?;
 
-    // ── Store a pending wager record in the DB immediately ────────────────────
-    let (wager_pda, _) = state.solana.wager_pda(&initiator, wager_id);
+    // ── Store a setup-pending wager record in the DB immediately ──────────────
     let on_chain_address = wager_pda.to_string();
 
     let wager_record = crate::models::WagerRecord {
@@ -234,7 +231,7 @@ pub async fn create_wager(
         challenger: req.challenger_address.clone(),
         stake_usdc: req.stake_usdc as i64,
         description: req.description.clone(),
-        status: "pending".to_string(),
+        status: "setup_pending".to_string(),
         resolution_source: req.resolution_source.clone(),
         resolver: req.resolver.clone(),
         expiry_ts: req.expiry_ts,
@@ -256,16 +253,17 @@ pub async fn create_wager(
     let notif_tx = state.notif_tx.clone();
     let challenger_addr = req.challenger_address.clone();
     let desc_clone = req.description.clone();
+    let on_chain_address_for_notification = on_chain_address.clone();
     tokio::spawn(async move {
         // Insert wager record
         if let Err(e) = db.upsert_wager(&wager_record).await {
-            tracing::error!("Failed to insert pending wager: {}", e);
+            tracing::error!("Failed to insert setup-pending wager: {}", e);
         }
 
         // Notify the challenged user (if specified)
         if let Some(ref challenger) = challenger_addr {
             let payload = serde_json::json!({
-                "wager_address": on_chain_address,
+                "wager_address": on_chain_address_for_notification,
                 "initiator": wager_record.initiator,
                 "description": desc_clone,
                 "stake_usdc": wager_record.stake_usdc,
@@ -299,9 +297,72 @@ pub async fn create_wager(
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: format!(
-            "Create wager: '{}' for {} micro-USDC",
+            "Setup wager: initialize {} and escrow for '{}' ({} micro-USDC)",
+            on_chain_address,
             req.description, req.stake_usdc
         ),
+    })))
+}
+
+// ─── POST /wagers/:address/fund ──────────────────────────────────────────────
+
+pub async fn fund_wager(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+    Json(req): Json<FundWagerRequest>,
+) -> AppResult<TxResponse> {
+    let wager = state.db.get_wager_by_address(&address).await
+        .map_err(|e| internal_error(e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(ApiResponse::err("Wager not found"))))?;
+
+    let initiator = Pubkey::from_str(&req.initiator)
+        .map_err(|_| bad_request("Invalid initiator pubkey"))?;
+
+    if wager.initiator != req.initiator {
+        return Err(bad_request("Only the wager initiator can fund this wager"));
+    }
+
+    let wager_pubkey = Pubkey::from_str(&address)
+        .map_err(|_| bad_request("Invalid wager address"))?;
+
+    if !state.solana.account_exists(&wager_pubkey).await
+        .map_err(|e| internal_error(format!("Failed to check wager account: {}", e)))? {
+        return Err(bad_request("Wager setup has not been completed on-chain yet"));
+    }
+
+    let usdc_mint = state.solana.get_usdc_mint().await
+        .map_err(|e| internal_error(format!("Failed to fetch USDC mint from config: {}", e)))?;
+    let escrow_token_account = state.solana.get_associated_token_address(&wager_pubkey, &usdc_mint);
+
+    if !state.solana.account_exists(&escrow_token_account).await
+        .map_err(|e| internal_error(format!("Failed to check escrow token account: {}", e)))? {
+        return Err(bad_request("Escrow token account is missing; complete setup before funding"));
+    }
+
+    let initiator_token_account = state.solana.get_associated_token_address(&initiator, &usdc_mint);
+    let ix = state.solana.ix_fund_wager(
+        &initiator,
+        wager.wager_id as u64,
+        &usdc_mint,
+        &initiator_token_account,
+    );
+
+    let tx_b64 = state.solana
+        .build_transaction(vec![ix], &initiator)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    let db = state.db.clone();
+    let addr = address.clone();
+    tokio::spawn(async move {
+        if let Err(e) = db.update_wager_status(&addr, "pending").await {
+            tracing::error!("Failed to update wager status to pending after funding: {}", e);
+        }
+    });
+
+    Ok(Json(ApiResponse::ok(TxResponse {
+        transaction_b64: tx_b64,
+        description: format!("Fund wager #{} ({} micro-USDC)", wager.wager_id, wager.stake_usdc),
     })))
 }
 

@@ -35,7 +35,7 @@ declare_id!("Dj2Hot5XJLv9S724BRkWohrhUfzLFERBnZJ9da2WBJQK");
 ///
 ///  Lifecycle
 ///  ─────────
-///  Pending ──accept──► Active ──resolve──► Resolved
+///  Initialized ──fund──► Pending ──accept──► Active ──resolve──► Resolved
 ///     │                  │
 ///     │                  └──dispute──► Disputed ──settle──► Resolved
 ///     │                                                └──expire──► Expired
@@ -79,9 +79,14 @@ pub mod wager {
 
     // ── Wager Lifecycle ───────────────────────────────────────────────────────
 
-    /// Create a new P2P wager and escrow the initiator's stake.
-    pub fn create_wager(ctx: Context<CreateWager>, args: CreateWagerArgs) -> Result<()> {
-        handle_create_wager(ctx, args)
+    /// Create a new P2P wager account without funding it yet.
+    pub fn initialize_wager(ctx: Context<InitializeWager>, args: CreateWagerArgs) -> Result<()> {
+        handle_initialize_wager(ctx, args)
+    }
+
+    /// Fund a previously initialized wager's escrow ATA.
+    pub fn fund_wager(ctx: Context<FundWager>) -> Result<()> {
+        handle_fund_wager(ctx)
     }
 
     /// Accept an open wager as the challenger and escrow the matching stake.

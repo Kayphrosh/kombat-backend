@@ -6,12 +6,15 @@
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use solana_rpc_client::nonblocking::rpc_client::RpcClient;
+use solana_rpc_client_api::config::RpcSimulateTransactionConfig;
 use solana_sdk::{
+    commitment_config::CommitmentConfig,
     instruction::{AccountMeta, Instruction},
     message::Message,
     pubkey::Pubkey,
     transaction::Transaction,
 };
+use solana_transaction_status::UiTransactionEncoding;
 use std::str::FromStr;
 
 /// The deployed Wager program ID
@@ -112,10 +115,34 @@ impl SolanaService {
         );
 
         let tx = Transaction::new_unsigned(message);
+        self.simulate_transaction(&tx).await?;
         let serialized = bincode::serialize(&tx)
             .context("Failed to serialize transaction")?;
 
         Ok(B64.encode(serialized))
+    }
+
+    async fn simulate_transaction(&self, tx: &Transaction) -> Result<()> {
+        let simulation = self.rpc
+            .simulate_transaction_with_config(
+                tx,
+                RpcSimulateTransactionConfig {
+                    sig_verify: false,
+                    replace_recent_blockhash: true,
+                    commitment: Some(CommitmentConfig::processed()),
+                    encoding: Some(UiTransactionEncoding::Base64),
+                    ..RpcSimulateTransactionConfig::default()
+                },
+            )
+            .await
+            .context("Failed to simulate transaction")?;
+
+        if let Some(err) = simulation.value.err {
+            let logs = simulation.value.logs.unwrap_or_default().join(" | ");
+            anyhow::bail!("Transaction simulation failed: {err}. Logs: {logs}");
+        }
+
+        Ok(())
     }
 
     // ── Instruction Builders ──────────────────────────────────────────────────
@@ -140,7 +167,7 @@ impl SolanaService {
         }
     }
 
-    /// Build the `create_wager` instruction.
+    /// Build the `initialize_wager` instruction.
     /// 
     /// # Arguments
     /// * `initiator` - The initiator's wallet pubkey
@@ -148,22 +175,17 @@ impl SolanaService {
     /// * `usdc_mint` - The USDC mint address from on-chain config
     /// * `initiator_token_account` - The initiator's USDC ATA
     /// * `args_data` - Borsh-serialized CreateWagerArgs
-    pub fn ix_create_wager(
+    pub fn ix_initialize_wager(
         &self,
         initiator: &Pubkey,
         wager_id: u64,
-        usdc_mint: &Pubkey,
-        initiator_token_account: &Pubkey,
         args_data: Vec<u8>,
     ) -> Instruction {
         let (config, _)   = self.config_pda();
         let (registry, _) = self.registry_pda(initiator);
         let (wager, _)    = self.wager_pda(initiator, wager_id);
-        
-        // Escrow token account is the ATA owned by the wager PDA
-        let escrow_token_account = self.get_associated_token_address(&wager, usdc_mint);
 
-        let mut data = anchor_discriminator("create_wager");
+        let mut data = anchor_discriminator("initialize_wager");
         data.extend_from_slice(&args_data);
 
         Instruction {
@@ -175,22 +197,39 @@ impl SolanaService {
                 AccountMeta::new(registry, false),
                 // 3. wager (init, mutable)
                 AccountMeta::new(wager, false),
-                // 4. usdc_mint (readonly)
-                AccountMeta::new_readonly(*usdc_mint, false),
-                // 5. escrow_token_account (init, mutable)
-                AccountMeta::new(escrow_token_account, false),
-                // 6. initiator_token_account (mutable)
-                AccountMeta::new(*initiator_token_account, false),
-                // 7. initiator (signer, mutable)
+                // 4. initiator (signer, mutable)
                 AccountMeta::new(*initiator, true),
-                // 8. system_program
+                // 5. system_program
                 AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
-                // 9. token_program
-                AccountMeta::new_readonly(self.token_program_id, false),
-                // 10. associated_token_program
-                AccountMeta::new_readonly(self.associated_token_program_id, false),
             ],
             data,
+        }
+    }
+
+    /// Build the `fund_wager` instruction.
+    pub fn ix_fund_wager(
+        &self,
+        initiator: &Pubkey,
+        wager_id: u64,
+        usdc_mint: &Pubkey,
+        initiator_token_account: &Pubkey,
+    ) -> Instruction {
+        let (config, _) = self.config_pda();
+        let (wager, _) = self.wager_pda(initiator, wager_id);
+        let escrow_token_account = self.get_associated_token_address(&wager, usdc_mint);
+
+        Instruction {
+            program_id: self.program_id,
+            accounts: vec![
+                AccountMeta::new_readonly(config, false),
+                AccountMeta::new(wager, false),
+                AccountMeta::new_readonly(*usdc_mint, false),
+                AccountMeta::new(escrow_token_account, false),
+                AccountMeta::new(*initiator_token_account, false),
+                AccountMeta::new(*initiator, true),
+                AccountMeta::new_readonly(self.token_program_id, false),
+            ],
+            data: anchor_discriminator("fund_wager"),
         }
     }
 

@@ -16,6 +16,8 @@ pub enum WagerStatus {
     Disputed,
     /// Expired (deadline passed with no acceptance)
     Expired,
+    /// State account exists but initiator has not funded escrow yet
+    Initialized,
 }
 
 impl Default for WagerStatus {

@@ -733,6 +733,7 @@ All routes available under both `/wagers/*` and `/api/kombats/*`.
 | `GET`  | `/api/kombats`                         | No   | Query: `?initiator=&challenger=&status=&limit=&offset=`    | `[Wager]`    |
 | `GET`  | `/api/kombats/:address`                | No   | —                                                          | `Wager`      |
 | `POST` | `/api/kombats`                         | No   | `CreateWagerRequest`                                       | `TxResponse` |
+| `POST` | `/api/kombats/:address/fund`           | No   | `{ "initiator": "pubkey" }`                                | `TxResponse` |
 | `POST` | `/api/kombats/:address/accept`         | No   | `{ "challenger": "pubkey" }`                               | `TxResponse` |
 | `POST` | `/api/kombats/:address/cancel`         | No   | `{ "initiator": "pubkey" }`                                | `TxResponse` |
 | `POST` | `/api/kombats/:address/decline`        | No   | `{ "initiator": "pubkey" }`                                | `TxResponse` |
@@ -766,7 +767,12 @@ All routes available under both `/wagers/*` and `/api/kombats/*`.
 }
 ```
 
-**Frontend flow:** Decode → Sign with wallet → Submit to Solana RPC.
+**Frontend flow for creating a kombat:**  
+1. Call `POST /api/kombats` and sign/broadcast the setup tx.  
+2. Wait for setup confirmation.  
+3. Call `POST /api/kombats/:address/fund` and sign/broadcast the final funding tx.
+
+All returned transactions are simulated server-side before `transaction_b64` is returned.
 
 ```typescript
 const { data } = await fetch(`${API}/api/kombats`, {

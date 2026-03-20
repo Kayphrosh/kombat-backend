@@ -157,8 +157,13 @@ The issued JWT contains `{ wallet, exp }` and must be sent as `Authorization: Be
                    └──────────────────────────────────┘
 
   POST /api/kombats
+  ┌───────────────┐
+  │ setup_pending │  ◄── Setup tx initializes wager PDA + escrow ATA
+  └──────┬────────┘
+         │   POST /api/kombats/:address/fund
+         ▼
   ┌──────────┐
-  │ pending  │  ◄── Unsigned tx returned; user signs and broadcasts
+  │ pending  │  ◄── Final tx funds escrow using existing accounts only
   └────┬─────┘
        │   POST /api/kombats/:address/accept
        ▼
@@ -192,7 +197,9 @@ The issued JWT contains `{ wallet, exp }` and must be sent as `Authorization: Be
 The backend builds **unsigned** Solana transactions using Anchor instruction builders:
 
 - `initialize_registry` — auto-prepended on first wager for a new user
-- `create_wager` — locks initiator's USDC in escrow PDA
+- `initialize_wager` — creates the wager PDA in a setup transaction
+- explicit ATA creation — creates the wager escrow token account during setup
+- `fund_wager` — locks initiator's USDC after setup is already on-chain
 - `accept_wager` — locks challenger's USDC in the same escrow
 - `cancel_wager` / decline — refunds initiator from escrow
 - `resolve_by_arbitrator` — pays winner + treasury fee
@@ -354,8 +361,9 @@ GET  /uploads/*     ← Static file serving
 | Method | Path                                   | Auth | Description                                            |
 | ------ | -------------------------------------- | ---- | ------------------------------------------------------ |
 | GET    | `/api/kombats`                         | —    | List kombats (filter by initiator, challenger, status) |
-| POST   | `/api/kombats`                         | —    | Create kombat → returns unsigned tx                    |
+| POST   | `/api/kombats`                         | —    | Create kombat setup tx                                 |
 | GET    | `/api/kombats/:address`                | —    | Get kombat detail with participant profiles            |
+| POST   | `/api/kombats/:address/fund`           | —    | Fund initialized kombat → final unsigned tx            |
 | POST   | `/api/kombats/:address/accept`         | —    | Accept → unsigned tx for challenger                    |
 | POST   | `/api/kombats/:address/decline`        | —    | Decline challenge                                      |
 | POST   | `/api/kombats/:address/cancel`         | —    | Cancel (initiator only)                                |

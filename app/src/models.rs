@@ -32,6 +32,11 @@ pub struct AcceptWagerRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct FundWagerRequest {
+    pub initiator: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct ResolveWagerRequest {
     pub winner: String,
     pub caller: String,

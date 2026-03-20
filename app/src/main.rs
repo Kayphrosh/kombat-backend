@@ -19,7 +19,7 @@ mod services;
 use handlers::wager::{
     AppState, accept_wager, cancel_wager, create_wager, decline_wager,
     dispute_wager, get_wager, list_wagers, resolve_wager, consent_wager,
-    submit_dispute_form, get_dispute_submissions,
+    submit_dispute_form, get_dispute_submissions, fund_wager,
 };
 use handlers::notifications::{list_notifications, mark_read as mark_notification_read, stream_notifications, ws_notifications};
 use handlers::auth::mint_token;
@@ -154,6 +154,7 @@ async fn main() -> anyhow::Result<()> {
         // ── Wager routes (original) ──────────────────────────────────────────
         .route("/wagers",                   get(list_wagers).post(create_wager))
         .route("/wagers/:address",          get(get_wager))
+        .route("/wagers/:address/fund",     post(fund_wager))
         .route("/wagers/:address/accept",   post(accept_wager))
         .route("/wagers/:address/cancel",   post(cancel_wager))
         .route("/wagers/:address/resolve",  post(resolve_wager))
@@ -164,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
         // ── /api/kombats aliases (same handlers) ─────────────────────────────
         .route("/api/kombats",                   get(list_wagers).post(create_wager))
         .route("/api/kombats/:address",          get(get_wager))
+        .route("/api/kombats/:address/fund",     post(fund_wager))
         .route("/api/kombats/:address/accept",   post(accept_wager))
         .route("/api/kombats/:address/cancel",   post(cancel_wager))
         .route("/api/kombats/:address/decline",  post(decline_wager))
