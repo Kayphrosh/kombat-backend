@@ -8,6 +8,36 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 use crate::models::{WagerRecord, WagerListQuery, UserRecord, UpdateProfileRequest, NotificationRecord, NonceRecord};
 use serde_json::Value as JsonValue;
 
+#[derive(sqlx::FromRow)]
+struct WagerWithUsersRow {
+    pub id: uuid::Uuid,
+    pub on_chain_address: String,
+    pub wager_id: i64,
+    pub initiator: String,
+    pub challenger: Option<String>,
+    pub stake_usdc: i64,
+    pub description: String,
+    pub status: String,
+    pub resolution_source: String,
+    pub resolver: String,
+    pub expiry_ts: i64,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub resolved_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub winner: Option<String>,
+    pub protocol_fee_bps: i16,
+    pub oracle_feed: Option<String>,
+    pub oracle_target: Option<i64>,
+    pub dispute_opened_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub dispute_opener: Option<String>,
+    pub initiator_option: Option<String>,
+    pub creator_declared_winner: Option<String>,
+    pub challenger_declared_winner: Option<String>,
+    pub initiator_name: Option<String>,
+    pub initiator_avatar: Option<String>,
+    pub challenger_name: Option<String>,
+    pub challenger_avatar: Option<String>,
+}
+
 pub struct DbService {
     pool: PgPool,
 }
@@ -176,42 +206,28 @@ impl DbService {
 
     /// Get a wager with participant user info (display names, avatars)
     pub async fn get_wager_with_users(&self, address: &str) -> Result<Option<crate::models::WagerDetailResponse>> {
-        let wager = self.get_wager_by_address(address).await?;
-        let wager = match wager {
-            Some(w) => w,
-            None => return Ok(None),
-        };
+        let rows = sqlx::query_as::<_, WagerWithUsersRow>(
+            r#"SELECT
+                w.id, w.on_chain_address, w.wager_id, w.initiator, w.challenger,
+                w.stake_usdc, w.description, w.status, w.resolution_source,
+                w.resolver, w.expiry_ts, w.created_at, w.resolved_at, w.winner,
+                w.protocol_fee_bps, w.oracle_feed, w.oracle_target,
+                w.dispute_opened_at, w.dispute_opener, w.initiator_option,
+                w.creator_declared_winner, w.challenger_declared_winner,
+                ui.display_name AS initiator_name,
+                ui.avatar_url AS initiator_avatar,
+                uc.display_name AS challenger_name,
+                uc.avatar_url AS challenger_avatar
+               FROM wagers w
+               LEFT JOIN users ui ON ui.wallet_address = w.initiator
+               LEFT JOIN users uc ON uc.wallet_address = w.challenger
+               WHERE w.on_chain_address = $1"#,
+        )
+        .bind(address)
+        .fetch_optional(&self.pool)
+        .await?;
 
-        // Look up initiator user info
-        let initiator_user = self.get_user(&wager.initiator).await?;
-        let (initiator_name, initiator_avatar) = match initiator_user {
-            Some(u) => (u.display_name, u.avatar_url),
-            None => (None, None),
-        };
-
-        // Look up challenger user info (if present)
-        let (challenger_name, challenger_avatar) = if let Some(ref ch) = wager.challenger {
-            match self.get_user(ch).await? {
-                Some(u) => (u.display_name, u.avatar_url),
-                None => (None, None),
-            }
-        } else {
-            (None, None)
-        };
-
-        // Compute challenger option (opposite of initiator)
-        let challenger_option = wager.initiator_option.as_ref().map(|opt| {
-            if opt.to_lowercase() == "yes" { "no".to_string() } else { "yes".to_string() }
-        });
-
-        Ok(Some(crate::models::WagerDetailResponse {
-            wager,
-            initiator_name,
-            initiator_avatar,
-            challenger_name,
-            challenger_avatar,
-            challenger_option,
-        }))
+        Ok(rows.map(|row| Self::enrich_wager_row(row, None)))
     }
 
     pub async fn list_wagers(&self, q: &WagerListQuery) -> Result<Vec<WagerRecord>> {
@@ -249,6 +265,120 @@ impl DbService {
             .await?;
 
         Ok(rows)
+    }
+
+    pub async fn list_wagers_enriched(
+        &self,
+        q: &WagerListQuery,
+        context_wallet: Option<&str>,
+    ) -> Result<Vec<crate::models::WagerDetailResponse>> {
+        let limit = q.limit.unwrap_or(20).min(100);
+        let offset = q.offset.unwrap_or(0);
+
+        match (&q.initiator, &q.challenger, &q.status) {
+            (Some(initiator), None, status) => {
+                self.fetch_wagers_with_users(
+                    "w.initiator = $1 AND ($2::text IS NULL OR w.status = $2)",
+                    context_wallet,
+                    Some(initiator),
+                    status.as_deref(),
+                    limit,
+                    offset,
+                ).await
+            }
+            (None, Some(challenger), status) => {
+                self.fetch_wagers_with_users(
+                    "w.challenger = $1 AND ($2::text IS NULL OR w.status = $2)",
+                    context_wallet,
+                    Some(challenger),
+                    status.as_deref(),
+                    limit,
+                    offset,
+                ).await
+            }
+            (Some(initiator), Some(challenger), status) => {
+                let rows = sqlx::query_as::<_, WagerWithUsersRow>(
+                    r#"SELECT
+                        w.id, w.on_chain_address, w.wager_id, w.initiator, w.challenger,
+                        w.stake_usdc, w.description, w.status, w.resolution_source,
+                        w.resolver, w.expiry_ts, w.created_at, w.resolved_at, w.winner,
+                        w.protocol_fee_bps, w.oracle_feed, w.oracle_target,
+                        w.dispute_opened_at, w.dispute_opener, w.initiator_option,
+                        w.creator_declared_winner, w.challenger_declared_winner,
+                        ui.display_name AS initiator_name,
+                        ui.avatar_url AS initiator_avatar,
+                        uc.display_name AS challenger_name,
+                        uc.avatar_url AS challenger_avatar
+                       FROM wagers w
+                       LEFT JOIN users ui ON ui.wallet_address = w.initiator
+                       LEFT JOIN users uc ON uc.wallet_address = w.challenger
+                       WHERE w.initiator = $1
+                         AND w.challenger = $2
+                         AND ($3::text IS NULL OR w.status = $3)
+                       ORDER BY w.created_at DESC
+                       LIMIT $4 OFFSET $5"#,
+                )
+                .bind(initiator)
+                .bind(challenger)
+                .bind(status.as_deref())
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?;
+
+                Ok(rows
+                    .into_iter()
+                    .map(|row| Self::enrich_wager_row(row, context_wallet))
+                    .collect())
+            }
+            (None, None, status) => {
+                let rows = sqlx::query_as::<_, WagerWithUsersRow>(
+                    r#"SELECT
+                        w.id, w.on_chain_address, w.wager_id, w.initiator, w.challenger,
+                        w.stake_usdc, w.description, w.status, w.resolution_source,
+                        w.resolver, w.expiry_ts, w.created_at, w.resolved_at, w.winner,
+                        w.protocol_fee_bps, w.oracle_feed, w.oracle_target,
+                        w.dispute_opened_at, w.dispute_opener, w.initiator_option,
+                        w.creator_declared_winner, w.challenger_declared_winner,
+                        ui.display_name AS initiator_name,
+                        ui.avatar_url AS initiator_avatar,
+                        uc.display_name AS challenger_name,
+                        uc.avatar_url AS challenger_avatar
+                       FROM wagers w
+                       LEFT JOIN users ui ON ui.wallet_address = w.initiator
+                       LEFT JOIN users uc ON uc.wallet_address = w.challenger
+                       WHERE ($1::text IS NULL OR w.status = $1)
+                       ORDER BY w.created_at DESC
+                       LIMIT $2 OFFSET $3"#,
+                )
+                .bind(status.as_deref())
+                .bind(limit)
+                .bind(offset)
+                .fetch_all(&self.pool)
+                .await?;
+
+                Ok(rows
+                    .into_iter()
+                    .map(|row| Self::enrich_wager_row(row, context_wallet))
+                    .collect())
+            }
+        }
+    }
+
+    pub async fn list_my_wagers(
+        &self,
+        wallet: &str,
+        limit: Option<i64>,
+        offset: Option<i64>,
+    ) -> Result<Vec<crate::models::WagerDetailResponse>> {
+        self.fetch_wagers_with_users(
+            "(w.initiator = $1 OR w.challenger = $1) AND ($2::text IS NULL OR w.status = $2)",
+            Some(wallet),
+            Some(wallet),
+            None,
+            limit.unwrap_or(100).min(200),
+            offset.unwrap_or(0),
+        ).await
     }
 
     pub async fn update_wager_status(&self, address: &str, status: &str) -> Result<()> {
@@ -1329,5 +1459,119 @@ impl DbService {
             .await?;
 
         Ok(())
+    }
+    fn enrich_wager_row(
+        row: WagerWithUsersRow,
+        context_wallet: Option<&str>,
+    ) -> crate::models::WagerDetailResponse {
+        let wager = WagerRecord {
+            id: row.id,
+            on_chain_address: row.on_chain_address,
+            wager_id: row.wager_id,
+            initiator: row.initiator,
+            challenger: row.challenger,
+            stake_usdc: row.stake_usdc,
+            description: row.description,
+            status: row.status,
+            resolution_source: row.resolution_source,
+            resolver: row.resolver,
+            expiry_ts: row.expiry_ts,
+            created_at: row.created_at,
+            resolved_at: row.resolved_at,
+            winner: row.winner,
+            protocol_fee_bps: row.protocol_fee_bps,
+            oracle_feed: row.oracle_feed,
+            oracle_target: row.oracle_target,
+            dispute_opened_at: row.dispute_opened_at,
+            dispute_opener: row.dispute_opener,
+            initiator_option: row.initiator_option,
+            creator_declared_winner: row.creator_declared_winner,
+            challenger_declared_winner: row.challenger_declared_winner,
+        };
+
+        let challenger_option = wager.initiator_option.as_ref().map(|opt| {
+            if opt.to_lowercase() == "yes" { "no".to_string() } else { "yes".to_string() }
+        });
+
+        let (opponent_wallet, opponent_name, opponent_avatar) = match context_wallet {
+            Some(wallet) if wallet == wager.initiator => (
+                wager.challenger.clone(),
+                row.challenger_name.clone(),
+                row.challenger_avatar.clone(),
+            ),
+            Some(wallet) if wager.challenger.as_deref() == Some(wallet) => (
+                Some(wager.initiator.clone()),
+                row.initiator_name.clone(),
+                row.initiator_avatar.clone(),
+            ),
+            _ => (None, None, None),
+        };
+
+        crate::models::WagerDetailResponse {
+            wager,
+            initiator_name: row.initiator_name,
+            initiator_avatar: row.initiator_avatar,
+            challenger_name: row.challenger_name,
+            challenger_avatar: row.challenger_avatar,
+            challenger_option,
+            opponent_wallet,
+            opponent_name,
+            opponent_avatar,
+        }
+    }
+
+    async fn fetch_wagers_with_users(
+        &self,
+        filter_sql: &str,
+        context_wallet: Option<&str>,
+        bind_wallet: Option<&str>,
+        status: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<crate::models::WagerDetailResponse>> {
+        let sql = format!(
+            r#"SELECT
+                w.id, w.on_chain_address, w.wager_id, w.initiator, w.challenger,
+                w.stake_usdc, w.description, w.status, w.resolution_source,
+                w.resolver, w.expiry_ts, w.created_at, w.resolved_at, w.winner,
+                w.protocol_fee_bps, w.oracle_feed, w.oracle_target,
+                w.dispute_opened_at, w.dispute_opener, w.initiator_option,
+                w.creator_declared_winner, w.challenger_declared_winner,
+                ui.display_name AS initiator_name,
+                ui.avatar_url AS initiator_avatar,
+                uc.display_name AS challenger_name,
+                uc.avatar_url AS challenger_avatar
+               FROM wagers w
+               LEFT JOIN users ui ON ui.wallet_address = w.initiator
+               LEFT JOIN users uc ON uc.wallet_address = w.challenger
+               WHERE {filter_sql}
+               ORDER BY w.created_at DESC
+               LIMIT $3 OFFSET $4"#,
+        );
+
+        let mut query = sqlx::query_as::<_, WagerWithUsersRow>(&sql);
+
+        if let Some(wallet) = bind_wallet {
+            query = query.bind(wallet);
+        } else {
+            query = query.bind(Option::<String>::None);
+        }
+
+        if let Some(status) = status {
+            query = query.bind(status);
+        } else {
+            query = query.bind(Option::<String>::None);
+        }
+
+        let rows = query
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| Self::enrich_wager_row(row, context_wallet))
+            .collect())
     }
 }

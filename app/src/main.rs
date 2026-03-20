@@ -18,14 +18,14 @@ mod services;
 
 use handlers::wager::{
     AppState, accept_wager, cancel_wager, create_wager, decline_wager,
-    dispute_wager, get_wager, list_wagers, resolve_wager, consent_wager,
+    dispute_wager, get_wager, list_my_wagers, list_wagers, resolve_wager, consent_wager,
     submit_dispute_form, get_dispute_submissions, fund_wager,
 };
 use handlers::notifications::{list_notifications, mark_read as mark_notification_read, stream_notifications, ws_notifications};
 use handlers::auth::mint_token;
 use handlers::user::{
     get_user_profile, update_user_profile, delete_user,
-    get_user_stats, get_notification_settings, update_notification_settings,
+    get_home_summary, get_user_stats, get_notification_settings, update_notification_settings,
     register_push_token, search_users,
 };
 use handlers::upload::upload_file;
@@ -153,6 +153,7 @@ async fn main() -> anyhow::Result<()> {
 
         // ── Wager routes (original) ──────────────────────────────────────────
         .route("/wagers",                   get(list_wagers).post(create_wager))
+        .route("/wagers/mine",              get(list_my_wagers))
         .route("/wagers/:address",          get(get_wager))
         .route("/wagers/:address/fund",     post(fund_wager))
         .route("/wagers/:address/accept",   post(accept_wager))
@@ -164,6 +165,7 @@ async fn main() -> anyhow::Result<()> {
 
         // ── /api/kombats aliases (same handlers) ─────────────────────────────
         .route("/api/kombats",                   get(list_wagers).post(create_wager))
+        .route("/api/kombats/mine",              get(list_my_wagers))
         .route("/api/kombats/:address",          get(get_wager))
         .route("/api/kombats/:address/fund",     post(fund_wager))
         .route("/api/kombats/:address/accept",   post(accept_wager))
@@ -178,11 +180,13 @@ async fn main() -> anyhow::Result<()> {
         // ── User profile routes ──────────────────────────────────────────────
         .route("/users/search",                          get(search_users))
         .route("/users/:wallet",                         get(get_user_profile).post(update_user_profile).delete(delete_user))
+        .route("/home/:wallet",                          get(get_home_summary))
         .route("/users/:wallet/stats",                   get(get_user_stats))
         .route("/users/:wallet/notification-settings",   get(get_notification_settings).put(update_notification_settings))
 
         // ── /api/users/* aliases ──────────────────────────────────────────────
         .route("/api/users/search",                        get(search_users))
+        .route("/api/home/:wallet",                        get(get_home_summary))
         .route("/api/users/:wallet",                       get(get_user_profile).post(update_user_profile).delete(delete_user))
         .route("/api/users/:wallet/stats",                 get(get_user_stats))
         .route("/api/users/:wallet/notification-settings", get(get_notification_settings).put(update_notification_settings))

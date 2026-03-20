@@ -8,13 +8,17 @@ use std::sync::Arc;
 
 use crate::{
     handlers::wager::AppState,
-    models::{ApiResponse, UpdateProfileRequest, UserRecord, UserStats, NotificationSettings, UpdateNotificationSettings, UserSearchQuery},
+    models::{ApiResponse, HomeSummaryResponse, UpdateProfileRequest, UserRecord, UserStats, NotificationSettings, UpdateNotificationSettings, UserSearchQuery},
 };
 
 type AppResult<T> = Result<Json<ApiResponse<T>>, (StatusCode, Json<ApiResponse<()>>)>;
 
 fn internal_error(msg: impl Into<String>) -> (StatusCode, Json<ApiResponse<()>>) {
     (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::err(msg)))
+}
+
+fn is_history_status(status: &str) -> bool {
+    matches!(status, "resolved" | "cancelled" | "declined" | "expired")
 }
 
 // ─── GET /users/:wallet ───────────────────────────────────────────────────────
@@ -87,6 +91,30 @@ pub async fn get_user_stats(
     let stats = state.db.get_user_stats(&wallet_address).await
         .map_err(|e| internal_error(e.to_string()))?;
     Ok(Json(ApiResponse::ok(stats)))
+}
+
+// ─── GET /home/:wallet ────────────────────────────────────────────────────────
+
+pub async fn get_home_summary(
+    State(state): State<Arc<AppState>>,
+    Path(wallet_address): Path<String>,
+) -> AppResult<HomeSummaryResponse> {
+    let stats = state.db.get_user_stats(&wallet_address).await
+        .map_err(|e| internal_error(e.to_string()))?;
+    let wagers = state.db
+        .list_my_wagers(&wallet_address, Some(100), Some(0))
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    let (history_kombats, live_kombats): (Vec<_>, Vec<_>) = wagers
+        .into_iter()
+        .partition(|wager| is_history_status(&wager.wager.status));
+
+    Ok(Json(ApiResponse::ok(HomeSummaryResponse {
+        stats,
+        live_kombats,
+        history_kombats,
+    })))
 }
 
 // ─── GET /users/:wallet/notification-settings ─────────────────────────────────

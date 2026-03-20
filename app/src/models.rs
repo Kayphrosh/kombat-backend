@@ -112,6 +112,9 @@ pub struct WagerDetailResponse {
     pub challenger_name: Option<String>,
     pub challenger_avatar: Option<String>,
     pub challenger_option: Option<String>,
+    pub opponent_wallet: Option<String>,
+    pub opponent_name: Option<String>,
+    pub opponent_avatar: Option<String>,
 }
 
 // ─── User Profile ─────────────────────────────────────────────────────────────
@@ -181,6 +184,9 @@ pub struct NonceRecord {
 pub struct TxResponse {
     pub transaction_b64: String,
     pub description: String,
+    pub address: Option<String>,
+    pub on_chain_address: Option<String>,
+    pub wager_address: Option<String>,
 }
 
 // ─── Standard API Response wrapper ───────────────────────────────────────────
@@ -215,6 +221,13 @@ pub struct WagerListQuery {
     pub offset: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MineWagersQuery {
+    pub wallet: String,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
 // ─── User Stats ──────────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -223,6 +236,14 @@ pub struct UserStats {
     pub completed_count: i64,
     pub total_stake: i64,
     pub total_won: i64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct HomeSummaryResponse {
+    #[serde(flatten)]
+    pub stats: UserStats,
+    pub live_kombats: Vec<WagerDetailResponse>,
+    pub history_kombats: Vec<WagerDetailResponse>,
 }
 
 // ─── Notification Settings ───────────────────────────────────────────────────

@@ -56,42 +56,23 @@ pub async fn list_wagers(
     State(state): State<Arc<AppState>>,
     Query(query): Query<WagerListQuery>,
 ) -> AppResult<Vec<crate::models::WagerDetailResponse>> {
-    let wagers = state.db.list_wagers(&query).await
+    let context_wallet = query.initiator.as_deref().or(query.challenger.as_deref());
+    let wagers = state.db.list_wagers_enriched(&query, context_wallet).await
         .map_err(|e| internal_error(e.to_string()))?;
+    Ok(Json(ApiResponse::ok(wagers)))
+}
 
-    // Enrich each wager with participant names/avatars
-    let mut enriched = Vec::with_capacity(wagers.len());
-    for wager in wagers {
-        let initiator_user = state.db.get_user(&wager.initiator).await.ok().flatten();
-        let (initiator_name, initiator_avatar) = match initiator_user {
-            Some(u) => (u.display_name, u.avatar_url),
-            None => (None, None),
-        };
+// ─── GET /wagers/mine ─────────────────────────────────────────────────────────
 
-        let (challenger_name, challenger_avatar) = if let Some(ref ch) = wager.challenger {
-            match state.db.get_user(ch).await.ok().flatten() {
-                Some(u) => (u.display_name, u.avatar_url),
-                None => (None, None),
-            }
-        } else {
-            (None, None)
-        };
-
-        let challenger_option = wager.initiator_option.as_ref().map(|opt| {
-            if opt.to_lowercase() == "yes" { "no".to_string() } else { "yes".to_string() }
-        });
-
-        enriched.push(crate::models::WagerDetailResponse {
-            wager,
-            initiator_name,
-            initiator_avatar,
-            challenger_name,
-            challenger_avatar,
-            challenger_option,
-        });
-    }
-
-    Ok(Json(ApiResponse::ok(enriched)))
+pub async fn list_my_wagers(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<MineWagersQuery>,
+) -> AppResult<Vec<crate::models::WagerDetailResponse>> {
+    let wagers = state.db
+        .list_my_wagers(&query.wallet, query.limit, query.offset)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+    Ok(Json(ApiResponse::ok(wagers)))
 }
 
 // ─── GET /wagers/:address ─────────────────────────────────────────────────────
@@ -301,6 +282,9 @@ pub async fn create_wager(
             on_chain_address,
             req.description, req.stake_usdc
         ),
+        address: Some(on_chain_address.clone()),
+        on_chain_address: Some(on_chain_address.clone()),
+        wager_address: Some(on_chain_address),
     })))
 }
 
@@ -363,6 +347,9 @@ pub async fn fund_wager(
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: format!("Fund wager #{} ({} micro-USDC)", wager.wager_id, wager.stake_usdc),
+        address: Some(address.clone()),
+        on_chain_address: Some(address.clone()),
+        wager_address: Some(address),
     })))
 }
 
@@ -433,6 +420,9 @@ pub async fn accept_wager(
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: format!("Accept wager #{}", wager.wager_id),
+        address: Some(address.clone()),
+        on_chain_address: Some(address.clone()),
+        wager_address: Some(address),
     })))
 }
 
@@ -471,6 +461,9 @@ pub async fn cancel_wager(
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: format!("Cancel wager #{}", wager.wager_id),
+        address: Some(address.clone()),
+        on_chain_address: Some(address.clone()),
+        wager_address: Some(address),
     })))
 }
 
@@ -524,6 +517,9 @@ pub async fn decline_wager(
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: format!("Decline wager #{}", wager.wager_id),
+        address: Some(address.clone()),
+        on_chain_address: Some(address.clone()),
+        wager_address: Some(address),
     })))
 }
 
@@ -630,6 +626,9 @@ pub async fn resolve_wager(
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: format!("Resolve wager #{} — winner: {}", wager.wager_id, req.winner),
+        address: Some(address.clone()),
+        on_chain_address: Some(address.clone()),
+        wager_address: Some(address),
     })))
 }
 
@@ -707,6 +706,9 @@ pub async fn dispute_wager(
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: format!("Open dispute on wager #{}", wager.wager_id),
+        address: Some(address.clone()),
+        on_chain_address: Some(address.clone()),
+        wager_address: Some(address),
     })))
 }
 
@@ -866,5 +868,8 @@ pub async fn consent_wager(
     Ok(Json(ApiResponse::ok(TxResponse {
         transaction_b64: tx_b64,
         description: desc,
+        address: Some(address.clone()),
+        on_chain_address: Some(address.clone()),
+        wager_address: Some(address),
     })))
 }
