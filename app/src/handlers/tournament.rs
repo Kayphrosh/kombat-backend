@@ -1,5 +1,3 @@
-// app/src/handlers/tournament.rs
-//! Tournament / Match betting handlers (pool staking)
 
 use axum::{
     extract::{Path, Query, State},

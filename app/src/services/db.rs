@@ -1,7 +1,4 @@
-// app/src/services/db.rs
-//! PostgreSQL persistence layer using sqlx.
-//! Indexes on-chain wager state for fast queryability.
-//! All queries use runtime-checked sqlx (no compile-time DB required).
+
 
 use anyhow::Result;
 use sqlx::{PgPool, postgres::PgPoolOptions};

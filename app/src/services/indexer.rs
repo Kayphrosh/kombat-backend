@@ -1,6 +1,3 @@
-// app/src/services/indexer.rs
-//! On-chain event indexer — polls the Solana RPC for wager program transactions
-//! and syncs state into the PostgreSQL database.
 
 use anyhow::Result;
 use std::sync::Arc;

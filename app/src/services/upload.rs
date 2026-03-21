@@ -1,6 +1,4 @@
-// app/src/services/upload.rs
-//! File upload service — writes files to UPLOAD_DIR and returns public URLs.
-//! For production, swap to S3/Cloudflare R2.
+
 
 use anyhow::{anyhow, Result};
 use std::path::PathBuf;

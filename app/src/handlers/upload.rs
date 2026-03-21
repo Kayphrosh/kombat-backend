@@ -1,6 +1,3 @@
-// app/src/handlers/upload.rs
-//! File upload handler — accepts multipart/form-data and stores files.
-
 use axum::{
     extract::State,
     http::StatusCode,

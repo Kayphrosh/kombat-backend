@@ -1,4 +1,3 @@
-// app/src/handlers/mod.rs
 pub mod wager;
 pub mod user;
 pub mod notifications;

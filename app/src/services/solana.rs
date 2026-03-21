@@ -1,7 +1,3 @@
-// app/src/services/solana.rs
-//! Builds and serializes unsigned Solana transactions for the client to sign.
-//! The API never holds private keys — all transactions are returned as
-//! base64-encoded `VersionedTransaction` messages for wallet signing.
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
