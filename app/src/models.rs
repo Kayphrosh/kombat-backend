@@ -180,7 +180,7 @@ pub struct NonceRecord {
 
 // ─── Transaction Response ─────────────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct TxResponse {
     pub transaction_b64: String,
     pub description: String,

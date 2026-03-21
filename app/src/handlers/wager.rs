@@ -19,6 +19,7 @@ use crate::{
 };
 use redis::AsyncCommands;
 use serde_json;
+use sha2::{Digest, Sha256};
 use tracing;
 
 // ─── Shared app state ─────────────────────────────────────────────────────────
@@ -48,6 +49,15 @@ fn bad_request(msg: impl Into<String>) -> (StatusCode, Json<ApiResponse<()>>) {
 
 fn internal_error(msg: impl Into<String>) -> (StatusCode, Json<ApiResponse<()>>) {
     (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::err(msg)))
+}
+
+const CREATE_WAGER_SCOPE: &str = "create_wager_setup";
+
+fn create_wager_request_hash(req: &CreateWagerRequest) -> Result<String, String> {
+    let serialized = serde_json::to_vec(req)
+        .map_err(|e| format!("Failed to serialize create wager request: {}", e))?;
+    let hash = Sha256::digest(&serialized);
+    Ok(format!("{:x}", hash))
 }
 
 // ─── GET /wagers ──────────────────────────────────────────────────────────────
@@ -126,6 +136,22 @@ pub async fn create_wager(
 
     let initiator = Pubkey::from_str(&req.initiator)
         .map_err(|_| bad_request("Invalid initiator pubkey"))?;
+    let request_hash = create_wager_request_hash(&req)
+        .map_err(internal_error)?;
+
+    match state.db.begin_idempotent_request(CREATE_WAGER_SCOPE, &req.initiator, &request_hash).await
+        .map_err(|e| internal_error(format!("Failed to start idempotent kombat create: {}", e)))? {
+        crate::services::db::IdempotencyStatus::Completed(response) => {
+            return Ok(Json(ApiResponse::ok(response)));
+        }
+        crate::services::db::IdempotencyStatus::InProgress => {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ApiResponse::err("An identical kombat create request is already in progress")),
+            ));
+        }
+        crate::services::db::IdempotencyStatus::Started => {}
+    }
 
     // ── Check if the user's WagerRegistry exists on-chain ──────────────────
     let (registry_pda, _) = state.solana.registry_pda(&initiator);
@@ -199,7 +225,15 @@ pub async fn create_wager(
     let tx_b64 = state.solana
         .build_transaction(instructions, &initiator)
         .await
-        .map_err(|e| internal_error(e.to_string()))?;
+        .map_err(|e| {
+            let db = state.db.clone();
+            let initiator_wallet = req.initiator.clone();
+            let request_hash = request_hash.clone();
+            tokio::spawn(async move {
+                let _ = db.fail_idempotent_request(CREATE_WAGER_SCOPE, &initiator_wallet, &request_hash).await;
+            });
+            internal_error(e.to_string())
+        })?;
 
     // ── Store a setup-pending wager record in the DB immediately ──────────────
     let on_chain_address = wager_pda.to_string();
@@ -275,7 +309,7 @@ pub async fn create_wager(
         }
     });
 
-    Ok(Json(ApiResponse::ok(TxResponse {
+    let response = TxResponse {
         transaction_b64: tx_b64,
         description: format!(
             "Setup wager: initialize {} and escrow for '{}' ({} micro-USDC)",
@@ -285,7 +319,16 @@ pub async fn create_wager(
         address: Some(on_chain_address.clone()),
         on_chain_address: Some(on_chain_address.clone()),
         wager_address: Some(on_chain_address),
-    })))
+    };
+
+    state.db.complete_idempotent_request(
+        CREATE_WAGER_SCOPE,
+        &req.initiator,
+        &request_hash,
+        &response,
+    ).await.map_err(|e| internal_error(format!("Failed to persist idempotent kombat response: {}", e)))?;
+
+    Ok(Json(ApiResponse::ok(response)))
 }
 
 // ─── POST /wagers/:address/fund ──────────────────────────────────────────────

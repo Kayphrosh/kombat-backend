@@ -35,6 +35,12 @@ struct WagerWithUsersRow {
     pub challenger_avatar: Option<String>,
 }
 
+pub enum IdempotencyStatus {
+    Started,
+    Completed(crate::models::TxResponse),
+    InProgress,
+}
+
 pub struct DbService {
     pool: PgPool,
 }
@@ -126,6 +132,133 @@ impl DbService {
             "UPDATE notifications SET is_read = TRUE WHERE id = $1"
         )
         .bind(uuid)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    // ── Idempotency ─────────────────────────────────────────────────────────
+
+    pub async fn begin_idempotent_request(
+        &self,
+        scope: &str,
+        wallet: &str,
+        request_hash: &str,
+    ) -> Result<IdempotencyStatus> {
+        sqlx::query(
+            r#"DELETE FROM idempotency_keys
+               WHERE scope = $1 AND wallet = $2 AND request_hash = $3
+                 AND created_at < NOW() - INTERVAL '15 minutes'"#,
+        )
+        .bind(scope)
+        .bind(wallet)
+        .bind(request_hash)
+        .execute(&self.pool)
+        .await?;
+
+        let inserted: Option<uuid::Uuid> = sqlx::query_scalar(
+            r#"INSERT INTO idempotency_keys (scope, wallet, request_hash)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (scope, wallet, request_hash) DO NOTHING
+               RETURNING id"#,
+        )
+        .bind(scope)
+        .bind(wallet)
+        .bind(request_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        if inserted.is_some() {
+            return Ok(IdempotencyStatus::Started);
+        }
+
+        let row: Option<(Option<JsonValue>, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            r#"SELECT response_json, created_at
+               FROM idempotency_keys
+               WHERE scope = $1 AND wallet = $2 AND request_hash = $3"#,
+        )
+        .bind(scope)
+        .bind(wallet)
+        .bind(request_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        match row {
+            Some((Some(response_json), _)) => {
+                let response: crate::models::TxResponse = serde_json::from_value(response_json)?;
+                Ok(IdempotencyStatus::Completed(response))
+            }
+            Some((None, created_at)) => {
+                if created_at < chrono::Utc::now() - chrono::Duration::minutes(2) {
+                    sqlx::query(
+                        r#"DELETE FROM idempotency_keys
+                           WHERE scope = $1 AND wallet = $2 AND request_hash = $3"#,
+                    )
+                    .bind(scope)
+                    .bind(wallet)
+                    .bind(request_hash)
+                    .execute(&self.pool)
+                    .await?;
+
+                    let inserted: Option<uuid::Uuid> = sqlx::query_scalar(
+                        r#"INSERT INTO idempotency_keys (scope, wallet, request_hash)
+                           VALUES ($1, $2, $3)
+                           ON CONFLICT (scope, wallet, request_hash) DO NOTHING
+                           RETURNING id"#,
+                    )
+                    .bind(scope)
+                    .bind(wallet)
+                    .bind(request_hash)
+                    .fetch_optional(&self.pool)
+                    .await?;
+
+                    if inserted.is_some() {
+                        Ok(IdempotencyStatus::Started)
+                    } else {
+                        Ok(IdempotencyStatus::InProgress)
+                    }
+                } else {
+                    Ok(IdempotencyStatus::InProgress)
+                }
+            }
+            None => Ok(IdempotencyStatus::Started),
+        }
+    }
+
+    pub async fn complete_idempotent_request(
+        &self,
+        scope: &str,
+        wallet: &str,
+        request_hash: &str,
+        response: &crate::models::TxResponse,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"UPDATE idempotency_keys
+               SET response_json = $4
+               WHERE scope = $1 AND wallet = $2 AND request_hash = $3"#,
+        )
+        .bind(scope)
+        .bind(wallet)
+        .bind(request_hash)
+        .bind(serde_json::to_value(response)?)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn fail_idempotent_request(
+        &self,
+        scope: &str,
+        wallet: &str,
+        request_hash: &str,
+    ) -> Result<()> {
+        sqlx::query(
+            r#"DELETE FROM idempotency_keys
+               WHERE scope = $1 AND wallet = $2 AND request_hash = $3"#,
+        )
+        .bind(scope)
+        .bind(wallet)
+        .bind(request_hash)
         .execute(&self.pool)
         .await?;
         Ok(())
