@@ -7,36 +7,66 @@ use dotenvy::dotenv;
 use std::{net::SocketAddr, sync::Arc};
 use tower_http::{
     cors::{Any, CorsLayer},
-    trace::TraceLayer,
     services::ServeDir,
+    trace::TraceLayer,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 mod handlers;
 mod models;
 mod services;
+mod state;
 
-use handlers::wager::{
-    AppState, accept_wager, cancel_wager, create_wager, decline_wager,
-    dispute_wager, get_wager, list_my_wagers, list_wagers, resolve_wager, consent_wager,
-    submit_dispute_form, get_dispute_submissions, fund_wager,
+use handlers::admin::{
+    get_admin_organizer, get_admin_outcome_proposal, list_admin_organizers,
+    list_admin_outcome_proposals,
 };
-use handlers::notifications::{list_notifications, mark_read as mark_notification_read, stream_notifications, ws_notifications};
-use handlers::auth::mint_token;
-use handlers::user::{
-    get_user_profile, update_user_profile, delete_user,
-    get_home_summary, get_user_stats, get_notification_settings, update_notification_settings,
-    register_push_token, search_users,
+use handlers::agent::{get_admin_agent_run, list_admin_agent_runs, submit_agent_outcome_proposal};
+use handlers::market::{
+    activate_receipt_listing, create_receipt_listing, get_receipt_listing,
+    get_receipt_listing_buy_ptb, get_receipt_listing_list_ptb, list_receipt_listings,
+    mark_receipt_listing_sold,
 };
-use handlers::upload::upload_file;
+use handlers::notifications::{
+    list_notifications, mark_read as mark_notification_read, stream_notifications, ws_notifications,
+};
+use handlers::organizer::{
+    apply_organizer, create_organizer_kyc_session, get_organizer, review_organizer,
+};
+use handlers::payment::{
+    create_payment_intent, create_payment_intent_onramp_session, get_payment_intent,
+    get_payment_intent_ptb,
+};
+use handlers::ramp::{create_dynamic_ramp_session, list_ramp_providers};
+use handlers::sui::{
+    get_network_wallet_balances_handler, get_network_wallet_dashboard_handler,
+    get_network_wallet_usdc_balance_handler, get_sui_config, get_sui_health,
+    get_sui_network_config, get_sui_network_health, get_wallet_balances, get_wallet_dashboard,
+    get_wallet_usdc_balance,
+};
 use handlers::tournament::{
-    list_tournaments, create_tournament, get_tournament,
-    place_stake, calculate_payout, list_tournament_stakes,
-    resolve_tournament, cancel_tournament, sync_tournament,
-    get_user_stakes, get_user_stake_stats,
+    calculate_payout, cancel_tournament, create_organizer_match, create_organizer_tournament,
+    create_outcome_proposal, create_tournament, get_tournament, get_tournament_source_pandascore,
+    get_user_stake_stats, get_user_stakes, list_organizer_tournaments, list_outcome_proposals,
+    list_tournament_stakes, list_tournaments, place_stake, resolve_tournament,
+    review_outcome_proposal, sync_pandascore_tournaments, sync_tournament,
 };
-use services::{DbService, SolanaService, IndexerService};
-use prometheus::{Encoder, TextEncoder, IntCounter};
+use handlers::transak::{create_transak_widget_url, get_transak_config, get_transak_quote};
+use handlers::upload::upload_file;
+use handlers::user::{
+    delete_user, get_home_summary, get_notification_settings, get_user_profile, get_user_stats,
+    register_push_token, search_users, update_notification_settings, update_user_profile,
+};
+use handlers::walrus::{
+    create_walrus_artifact, get_walrus_artifact, get_walrus_blob_url, get_walrus_config,
+};
+use handlers::webhook::{handle_match_result_webhook, handle_pandascore_webhook};
+use prometheus::{Encoder, IntCounter, TextEncoder};
+use services::{
+    DbService, PandaScoreConfig, PandaScoreService, RampConfig, RampService, SuiConfig, SuiService,
+    TransakConfig, TransakService, WalrusConfig, WalrusService,
+};
+use state::AppState;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -52,10 +82,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     // ── Config from env ───────────────────────────────────────────────────────
-    let database_url = std::env::var("DATABASE_URL")
-        .expect("DATABASE_URL must be set");
-    let solana_rpc_url = std::env::var("SOLANA_RPC_URL")
-        .unwrap_or_else(|_| "https://api.devnet.solana.com".to_string());
+    let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL must be set");
     let port: u16 = std::env::var("PORT")
         .unwrap_or_else(|_| "3000".to_string())
         .parse()
@@ -65,33 +92,56 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Connecting to database...");
     let db = Arc::new(DbService::new(&database_url).await?);
 
-    tracing::info!("Connecting to Solana RPC: {}", solana_rpc_url);
-    let solana = Arc::new(SolanaService::new(&solana_rpc_url));
+    let sui_config = SuiConfig::from_env();
+    tracing::info!(
+        "Configuring Sui RPC: active_network={}, networks={}",
+        sui_config.active_network,
+        sui_config
+            .networks
+            .iter()
+            .map(|config| format!("{}:{}", config.network, config.rpc_url))
+            .collect::<Vec<_>>()
+            .join(",")
+    );
+    let sui = Arc::new(SuiService::new(sui_config));
 
-    // ── Indexer Start ─────────────────────────────────────────────────────────
-    let indexer_db = db.clone();
-    let indexer_rpc = solana_rpc_url.clone();
-    let program_id = std::env::var("WAGER_PROGRAM_ID")
-       .unwrap_or_else(|_| "Dj2Hot5XJLv9S724BRkWohrhUfzLFERBnZJ9da2WBJQK".to_string());
+    let ramp_config = RampConfig::from_env();
+    tracing::info!(
+        "Configuring ramps: primary_provider={}, dynamic_onramp_enabled={}",
+        ramp_config.primary_provider,
+        ramp_config.dynamic_onramp_enabled
+    );
+    let ramp = Arc::new(RampService::new(ramp_config));
 
-    tokio::spawn(async move {
-        let indexer = IndexerService::new(indexer_db, indexer_rpc, program_id);
-        indexer.run().await;
-    });
+    let transak_config = TransakConfig::from_env();
+    tracing::info!(
+        "Configuring Transak: enabled={}, environment={}, referrer_domain={}",
+        transak_config.enabled,
+        transak_config.environment,
+        transak_config.referrer_domain
+    );
+    let transak = Arc::new(TransakService::new(transak_config));
+
+    let pandascore_config = PandaScoreConfig::from_env();
+    tracing::info!(
+        "Configuring PandaScore: enabled={}, configured={}, base_url={}",
+        pandascore_config.enabled,
+        pandascore_config.configured(),
+        pandascore_config.base_url
+    );
+    let pandascore = Arc::new(PandaScoreService::new(pandascore_config));
+
+    let walrus_config = WalrusConfig::from_env();
+    tracing::info!(
+        "Configuring Walrus: enabled={}, configured={}, network={}",
+        walrus_config.enabled,
+        walrus_config.configured(),
+        walrus_config.network
+    );
+    let walrus = Arc::new(WalrusService::new(walrus_config));
 
     // Realtime notifications broadcast channel
     let (notif_tx, _notif_rx) = tokio::sync::broadcast::channel::<(String, serde_json::Value)>(100);
-    let nonce_rate = Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new()));
-
-    // Optionally initialize Redis if REDIS_URL is set
-    let redis_client = match std::env::var("REDIS_URL") {
-        Ok(url) => {
-            tracing::info!("Connecting to Redis: {}", url);
-            let client = redis::Client::open(url.as_str())?;
-            Some(Arc::new(client))
-        }
-        Err(_) => None,
-    };
 
     // ── Dynamic SDK service (optional) ────────────────────────────────────────
     let dynamic_service = match std::env::var("DYNAMIC_ENVIRONMENT_ID") {
@@ -106,8 +156,8 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // ── Upload service (optional) ─────────────────────────────────────────────
-    let upload_base_url = std::env::var("UPLOAD_BASE_URL")
-        .unwrap_or_else(|_| format!("http://localhost:{}", port));
+    let upload_base_url =
+        std::env::var("UPLOAD_BASE_URL").unwrap_or_else(|_| format!("http://localhost:{}", port));
     let upload_service = match std::env::var("UPLOAD_DIR") {
         Ok(dir) => {
             tracing::info!("File uploads enabled (dir: {})", dir);
@@ -123,19 +173,21 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Prometheus counters
-    let rl_exceeded = IntCounter::new("nonce_rate_limit_exceeded_total", "Number of nonce rate limit exceedances").unwrap();
-    let rl_requests = IntCounter::new("nonce_rate_limit_requests_total", "Number of nonce requests").unwrap();
-    let _ = prometheus::default_registry().register(Box::new(rl_exceeded.clone()));
-    let _ = prometheus::default_registry().register(Box::new(rl_requests.clone()));
+    let dynamic_auth_requests = IntCounter::new(
+        "dynamic_auth_requests_total",
+        "Number of Dynamic auth verification requests",
+    )
+    .unwrap();
+    let _ = prometheus::default_registry().register(Box::new(dynamic_auth_requests));
 
     let state = Arc::new(AppState {
         db,
-        solana,
+        sui,
+        ramp,
+        transak,
+        pandascore,
+        walrus,
         notif_tx: Arc::new(notif_tx),
-        nonce_rate,
-        redis_client,
-        rate_limit_exceeded: Some(std::sync::Arc::new(rl_exceeded)),
-        rate_limit_requests: Some(std::sync::Arc::new(rl_requests)),
         dynamic_service,
         upload_service,
     });
@@ -150,90 +202,206 @@ async fn main() -> anyhow::Result<()> {
     let mut app = Router::new()
         // Health check
         .route("/health", get(health_handler))
-
-        // ── Wager routes (original) ──────────────────────────────────────────
-        .route("/wagers",                   get(list_wagers).post(create_wager))
-        .route("/wagers/mine",              get(list_my_wagers))
-        .route("/wagers/:address",          get(get_wager))
-        .route("/wagers/:address/fund",     post(fund_wager))
-        .route("/wagers/:address/accept",   post(accept_wager))
-        .route("/wagers/:address/cancel",   post(cancel_wager))
-        .route("/wagers/:address/resolve",  post(resolve_wager))
-        .route("/wagers/:address/dispute",  post(dispute_wager).get(get_dispute_submissions))
-        .route("/wagers/:address/dispute/submit", post(submit_dispute_form))
-        .route("/wagers/:address/consent",  post(consent_wager))
-
-        // ── /api/kombats aliases (same handlers) ─────────────────────────────
-        .route("/api/kombats",                   get(list_wagers).post(create_wager))
-        .route("/api/kombats/mine",              get(list_my_wagers))
-        .route("/api/kombats/:address",          get(get_wager))
-        .route("/api/kombats/:address/fund",     post(fund_wager))
-        .route("/api/kombats/:address/accept",   post(accept_wager))
-        .route("/api/kombats/:address/cancel",   post(cancel_wager))
-        .route("/api/kombats/:address/decline",  post(decline_wager))
-        .route("/api/kombats/:address/resolve",  post(resolve_wager))
-        .route("/api/kombats/:address/declare-winner", post(consent_wager))
-        .route("/api/kombats/:address/dispute",  post(dispute_wager).get(get_dispute_submissions))
-        .route("/api/kombats/:address/dispute/submit", post(submit_dispute_form))
-        .route("/api/kombats/:address/consent",  post(consent_wager))
-
         // ── User profile routes ──────────────────────────────────────────────
-        .route("/users/search",                          get(search_users))
-        .route("/users/:wallet",                         get(get_user_profile).post(update_user_profile).delete(delete_user))
-        .route("/home/:wallet",                          get(get_home_summary))
-        .route("/users/:wallet/stats",                   get(get_user_stats))
-        .route("/users/:wallet/notification-settings",   get(get_notification_settings).put(update_notification_settings))
-
+        .route("/users/search", get(search_users))
+        .route(
+            "/users/:wallet",
+            get(get_user_profile)
+                .post(update_user_profile)
+                .delete(delete_user),
+        )
+        .route("/home/:wallet", get(get_home_summary))
+        .route("/users/:wallet/stats", get(get_user_stats))
+        .route(
+            "/users/:wallet/notification-settings",
+            get(get_notification_settings).put(update_notification_settings),
+        )
         // ── /api/users/* aliases ──────────────────────────────────────────────
-        .route("/api/users/search",                        get(search_users))
-        .route("/api/home/:wallet",                        get(get_home_summary))
-        .route("/api/users/:wallet",                       get(get_user_profile).post(update_user_profile).delete(delete_user))
-        .route("/api/users/:wallet/stats",                 get(get_user_stats))
-        .route("/api/users/:wallet/notification-settings", get(get_notification_settings).put(update_notification_settings))
-        .route("/api/users/:wallet/push-token",             post(register_push_token))
-        .route("/users/:wallet/push-token",                 post(register_push_token))
-
+        .route("/api/users/search", get(search_users))
+        .route("/api/home/:wallet", get(get_home_summary))
+        .route(
+            "/api/users/:wallet",
+            get(get_user_profile)
+                .post(update_user_profile)
+                .delete(delete_user),
+        )
+        .route("/api/users/:wallet/stats", get(get_user_stats))
+        .route(
+            "/api/users/:wallet/notification-settings",
+            get(get_notification_settings).put(update_notification_settings),
+        )
+        .route("/api/users/:wallet/push-token", post(register_push_token))
+        .route("/users/:wallet/push-token", post(register_push_token))
         // ── Notifications ────────────────────────────────────────────────────
-        .route("/notifications/:wallet",          get(list_notifications))
-        .route("/notifications/:id/read",         post(mark_notification_read))
-        .route("/notifications/stream/:wallet",   get(stream_notifications))
-        .route("/api/notifications/:wallet",      get(list_notifications))
-        .route("/api/notifications/:id/read",     post(mark_notification_read))
-
+        .route("/notifications/:wallet", get(list_notifications))
+        .route("/notifications/:id/read", post(mark_notification_read))
+        .route("/notifications/stream/:wallet", get(stream_notifications))
+        .route("/api/notifications/:wallet", get(list_notifications))
+        .route("/api/notifications/:id/read", post(mark_notification_read))
         // ── Auth ─────────────────────────────────────────────────────────────
-        .route("/auth/token",           post(mint_token))
-        .route("/auth/nonce/:wallet",   get(handlers::auth::get_nonce))
-        .route("/auth/verify",          post(handlers::auth::verify_signature))
-        .route("/api/auth/verify",      post(handlers::auth::verify_dynamic))
-
+        .route("/api/auth/verify", post(handlers::auth::verify_dynamic))
+        // ── Sui ──────────────────────────────────────────────────────────────
+        .route("/api/sui/config", get(get_sui_config))
+        .route("/api/sui/health", get(get_sui_health))
+        .route(
+            "/api/sui/networks/:network/config",
+            get(get_sui_network_config),
+        )
+        .route(
+            "/api/sui/networks/:network/health",
+            get(get_sui_network_health),
+        )
+        .route(
+            "/api/sui/wallets/:wallet/balances",
+            get(get_wallet_balances),
+        )
+        .route(
+            "/api/sui/wallets/:wallet/usdc-balance",
+            get(get_wallet_usdc_balance),
+        )
+        .route(
+            "/api/sui/wallets/:wallet/dashboard",
+            get(get_wallet_dashboard),
+        )
+        .route(
+            "/api/sui/networks/:network/wallets/:wallet/balances",
+            get(get_network_wallet_balances_handler),
+        )
+        .route(
+            "/api/sui/networks/:network/wallets/:wallet/usdc-balance",
+            get(get_network_wallet_usdc_balance_handler),
+        )
+        .route(
+            "/api/sui/networks/:network/wallets/:wallet/dashboard",
+            get(get_network_wallet_dashboard_handler),
+        )
+        // ── Generic funding provider layer ───────────────────────────────────
+        .route("/api/ramps/providers", get(list_ramp_providers))
+        .route("/api/ramps/session", post(create_dynamic_ramp_session))
+        // ── Programmable payment intents ────────────────────────────────────
+        .route("/api/payments/intents", post(create_payment_intent))
+        .route("/api/payments/intents/:id", get(get_payment_intent))
+        .route(
+            "/api/payments/intents/:id/onramp-session",
+            post(create_payment_intent_onramp_session),
+        )
+        .route("/api/payments/intents/:id/ptb", get(get_payment_intent_ptb))
+        // ── Stake receipt secondary market ──────────────────────────────────
+        .route(
+            "/api/receipt-market/listings",
+            get(list_receipt_listings).post(create_receipt_listing),
+        )
+        .route("/api/receipt-market/listings/:id", get(get_receipt_listing))
+        .route(
+            "/api/receipt-market/listings/:id/activate",
+            post(activate_receipt_listing),
+        )
+        .route(
+            "/api/receipt-market/listings/:id/list-ptb",
+            get(get_receipt_listing_list_ptb),
+        )
+        .route(
+            "/api/receipt-market/listings/:id/buy-ptb",
+            get(get_receipt_listing_buy_ptb),
+        )
+        .route(
+            "/api/receipt-market/listings/:id/mark-sold",
+            post(mark_receipt_listing_sold),
+        )
+        // ── Transak on-ramp fallback ─────────────────────────────────────────
+        .route("/api/transak/config", get(get_transak_config))
+        .route("/api/transak/widget-url", post(create_transak_widget_url))
+        .route("/api/transak/quote", post(get_transak_quote))
         // ── File upload ──────────────────────────────────────────────────────
-        .route("/api/uploads",          post(upload_file))
-
+        .route("/api/uploads", post(upload_file))
+        // ── Walrus artifacts / agent evidence ───────────────────────────────
+        .route("/api/walrus/config", get(get_walrus_config))
+        .route("/api/walrus/artifacts", post(create_walrus_artifact))
+        .route("/api/walrus/artifacts/:id", get(get_walrus_artifact))
+        .route("/api/walrus/blobs/:blob_id/url", get(get_walrus_blob_url))
+        .route(
+            "/api/agents/outcome-proposals",
+            post(submit_agent_outcome_proposal),
+        )
+        .route("/api/admin/agent-runs", get(list_admin_agent_runs))
+        .route("/api/admin/agent-runs/:id", get(get_admin_agent_run))
+        // ── Webhooks (organizer systems + PandaScore) ────────────────────────
+        .route(
+            "/api/webhooks/match-result",
+            post(handle_match_result_webhook),
+        )
+        .route("/api/webhooks/pandascore", post(handle_pandascore_webhook))
         // ── Tournament / Match Betting (Pool Staking) ────────────────────────
-        .route("/api/tournaments",                      get(list_tournaments).post(create_tournament))
-        .route("/api/tournaments/:id",                  get(get_tournament))
-        .route("/api/tournaments/:id/stake",            post(place_stake))
-        .route("/api/tournaments/:id/calculate",        post(calculate_payout))
-        .route("/api/tournaments/:id/stakes",           get(list_tournament_stakes))
-        .route("/api/tournaments/:id/resolve",          post(resolve_tournament))
-        .route("/api/tournaments/:id/cancel",           post(cancel_tournament))
-        .route("/api/tournaments/:id/sync",             post(sync_tournament))
-        .route("/api/users/:wallet/stakes",             get(get_user_stakes))
-        .route("/api/users/:wallet/stake-stats",        get(get_user_stake_stats))
-
+        .route(
+            "/api/tournaments",
+            get(list_tournaments).post(create_tournament),
+        )
+        .route(
+            "/api/tournaments/source/pandascore",
+            get(get_tournament_source_pandascore),
+        )
+        .route(
+            "/api/tournaments/source/pandascore/sync",
+            post(sync_pandascore_tournaments),
+        )
+        .route("/api/tournaments/:id", get(get_tournament))
+        .route(
+            "/api/tournaments/:id/outcome-proposals",
+            get(list_outcome_proposals).post(create_outcome_proposal),
+        )
+        .route(
+            "/api/outcome-proposals/:id/review",
+            post(review_outcome_proposal),
+        )
+        .route("/api/admin/organizers", get(list_admin_organizers))
+        .route("/api/admin/organizers/:wallet", get(get_admin_organizer))
+        .route(
+            "/api/admin/outcome-proposals",
+            get(list_admin_outcome_proposals),
+        )
+        .route(
+            "/api/admin/outcome-proposals/:id",
+            get(get_admin_outcome_proposal),
+        )
+        .route(
+            "/api/organizer/tournaments",
+            get(list_organizer_tournaments).post(create_organizer_tournament),
+        )
+        .route(
+            "/api/organizer/tournaments/:id/matches",
+            post(create_organizer_match),
+        )
+        .route("/api/organizers/apply", post(apply_organizer))
+        .route(
+            "/api/organizers/kyc-session",
+            post(create_organizer_kyc_session),
+        )
+        .route("/api/organizers/:wallet", get(get_organizer))
+        .route("/api/organizers/:wallet/review", post(review_organizer))
+        .route("/api/tournaments/:id/stake", post(place_stake))
+        .route("/api/tournaments/:id/calculate", post(calculate_payout))
+        .route("/api/tournaments/:id/stakes", get(list_tournament_stakes))
+        .route("/api/tournaments/:id/resolve", post(resolve_tournament))
+        .route("/api/tournaments/:id/cancel", post(cancel_tournament))
+        .route("/api/tournaments/:id/sync", post(sync_tournament))
+        .route("/api/users/:wallet/stakes", get(get_user_stakes))
+        .route("/api/users/:wallet/stake-stats", get(get_user_stake_stats))
         // ── WebSocket ────────────────────────────────────────────────────────
         .route("/ws/notifications/:wallet", get(ws_notifications))
-
         // ── Prometheus metrics ───────────────────────────────────────────────
         .route("/metrics", get(get_metrics))
         .layer(cors)
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(Arc::clone(&state));
 
     // ── Serve uploaded files (if UPLOAD_DIR is configured) ────────────────────
     if let Ok(upload_dir) = std::env::var("UPLOAD_DIR") {
         app = app.nest_service("/uploads", ServeDir::new(upload_dir));
     }
+
+    // ── Start background poller ───────────────────────────────────────────────
+    let poller_config = services::poller::PollerConfig::from_env();
+    services::poller::spawn(state, poller_config);
 
     // ── Start server ──────────────────────────────────────────────────────────
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
@@ -257,10 +425,42 @@ async fn get_metrics() -> impl axum::response::IntoResponse {
     )
 }
 
-async fn health_handler() -> axum::Json<serde_json::Value> {
+async fn health_handler(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+) -> axum::Json<serde_json::Value> {
+    let sui = state.sui.config();
+    let ramp = state.ramp.config();
+    let transak = state.transak.config();
     axum::Json(serde_json::json!({
         "status": "ok",
         "service": "wager-api",
         "version": env!("CARGO_PKG_VERSION"),
+        "sui": {
+            "active_network": sui.active_network.clone(),
+            "networks": sui.networks.clone(),
+        },
+        "transak": {
+            "enabled": transak.enabled,
+            "environment": transak.environment.clone(),
+            "default_network": transak.default_network.clone(),
+            "default_crypto_currency": transak.default_crypto_currency.clone(),
+            "default_fiat_currency": transak.default_fiat_currency.clone(),
+            "partner_fee_bps": transak.partner_fee_bps,
+        },
+        "ramps": {
+            "primary_provider": ramp.primary_provider.clone(),
+            "dynamic_onramp_enabled": ramp.dynamic_onramp_enabled,
+            "manual_deposit_enabled": ramp.manual_deposit_enabled,
+            "default_network": ramp.default_network.clone(),
+            "default_crypto_currency": ramp.default_crypto_currency.clone(),
+            "default_fiat_currency": ramp.default_fiat_currency.clone(),
+            "partner_fee_bps": ramp.partner_fee_bps,
+        },
+        "walrus": {
+            "enabled": state.walrus.config().enabled,
+            "configured": state.walrus.config().configured(),
+            "network": state.walrus.config().network.clone(),
+            "aggregator_url": state.walrus.config().aggregator_url.clone(),
+        }
     }))
 }

@@ -30,32 +30,33 @@ pub struct DynamicCredential {
     pub public_key: Option<String>,
 }
 
-/// Check if a string looks like a valid Solana base58 address (32-44 alphanumeric chars).
-fn is_solana_address(s: &str) -> bool {
-    let len = s.len();
-    (32..=44).contains(&len) && s.chars().all(|c| c.is_alphanumeric())
+/// Check if a string looks like a canonical Sui address.
+fn is_sui_address(s: &str) -> bool {
+    let Some(hex) = s.strip_prefix("0x") else {
+        return false;
+    };
+    hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 impl DynamicClaims {
-    /// Extract the primary Solana wallet address from the token.
-    /// Prioritises credentials marked with chain="solana", then any blockchain
-    /// credential with a valid-looking base58 address. Never falls back to the
+    /// Extract the primary Sui wallet address from the token.
+    /// Prioritizes credentials marked with chain="sui", then any blockchain
+    /// credential with a valid-looking Sui address. Never falls back to the
     /// Dynamic user UUID (`sub`).
     pub fn wallet_address(&self) -> Option<String> {
         if let Some(creds) = &self.verified_credentials {
-            // 1. Prefer a credential explicitly tagged as Solana
+            // 1. Prefer a credential explicitly tagged as Sui
             for cred in creds {
                 if let Some(chain) = &cred.chain {
                     let chain_lower = chain.to_lowercase();
-                    if (chain_lower == "solana" || chain_lower == "sol") {
-                        // Try address first, then public_key
+                    if chain_lower == "sui" {
                         if let Some(addr) = &cred.address {
-                            if is_solana_address(addr) {
+                            if is_sui_address(addr) {
                                 return Some(addr.clone());
                             }
                         }
                         if let Some(pk) = &cred.public_key {
-                            if is_solana_address(pk) {
+                            if is_sui_address(pk) {
                                 return Some(pk.clone());
                             }
                         }
@@ -63,31 +64,34 @@ impl DynamicClaims {
                 }
             }
 
-            // 2. Fall back to any blockchain credential with a valid base58 address
+            // 2. Fall back to any blockchain credential with a valid Sui address
             for cred in creds {
                 let is_blockchain = cred.format.as_deref() == Some("blockchain");
                 if let Some(addr) = &cred.address {
-                    if is_blockchain && is_solana_address(addr) {
+                    if is_blockchain && is_sui_address(addr) {
                         return Some(addr.clone());
                     }
                 }
             }
 
-            // 3. Last resort: any credential with a valid-looking Solana address
+            // 3. Last resort: any credential with a valid-looking Sui address
             for cred in creds {
                 if let Some(addr) = &cred.address {
-                    if is_solana_address(addr) {
+                    if is_sui_address(addr) {
                         return Some(addr.clone());
                     }
                 }
             }
         }
 
-        // Log for debugging — do NOT fall back to sub (it's a UUID, not a wallet)
+        // Log only non-sensitive metadata; credentials can contain PII.
         tracing::warn!(
-            "No Solana wallet address found in Dynamic token. sub={:?}, creds={:?}",
+            "No Sui wallet address found in Dynamic token. sub={:?}, credential_count={}",
             self.sub,
             self.verified_credentials
+                .as_ref()
+                .map(|creds| creds.len())
+                .unwrap_or(0)
         );
         None
     }

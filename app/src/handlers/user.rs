@@ -1,4 +1,3 @@
-
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
@@ -7,14 +6,20 @@ use axum::{
 use std::sync::Arc;
 
 use crate::{
-    handlers::wager::AppState,
-    models::{ApiResponse, HomeSummaryResponse, UpdateProfileRequest, UserRecord, UserStats, NotificationSettings, UpdateNotificationSettings, UserSearchQuery},
+    models::{
+        ApiResponse, HomeSummaryResponse, NotificationSettings, UpdateNotificationSettings,
+        UpdateProfileRequest, UserRecord, UserSearchQuery, UserStats,
+    },
+    state::AppState,
 };
 
 type AppResult<T> = Result<Json<ApiResponse<T>>, (StatusCode, Json<ApiResponse<()>>)>;
 
 fn internal_error(msg: impl Into<String>) -> (StatusCode, Json<ApiResponse<()>>) {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::err(msg)))
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiResponse::err(msg)),
+    )
 }
 
 fn is_history_status(status: &str) -> bool {
@@ -27,10 +32,18 @@ pub async fn get_user_profile(
     State(state): State<Arc<AppState>>,
     Path(wallet_address): Path<String>,
 ) -> AppResult<UserRecord> {
-    let user: Option<UserRecord> = state.db.get_user(&wallet_address).await
+    let user: Option<UserRecord> = state
+        .db
+        .get_user(&wallet_address)
+        .await
         .map_err(|e: anyhow::Error| internal_error(e.to_string()))?;
 
-    let user = user.ok_or_else(|| (StatusCode::NOT_FOUND, Json(ApiResponse::err("User not found"))))?;
+    let user = user.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::err("User not found")),
+        )
+    })?;
     Ok(Json(ApiResponse::ok(user)))
 }
 
@@ -40,7 +53,8 @@ pub async fn search_users(
     State(state): State<Arc<AppState>>,
     Query(query_params): Query<UserSearchQuery>,
 ) -> AppResult<Vec<UserRecord>> {
-    let query = query_params.query
+    let query = query_params
+        .query
         .or(query_params.q)
         .or(query_params.username)
         .or(query_params.display_name)
@@ -52,7 +66,10 @@ pub async fn search_users(
 
     let limit = query_params.limit.unwrap_or(20).min(50);
 
-    let users = state.db.search_users(&query, limit).await
+    let users = state
+        .db
+        .search_users(&query, limit)
+        .await
         .map_err(|e| internal_error(e.to_string()))?;
 
     Ok(Json(ApiResponse::ok(users)))
@@ -65,7 +82,10 @@ pub async fn update_user_profile(
     Path(wallet_address): Path<String>,
     Json(req): Json<UpdateProfileRequest>,
 ) -> AppResult<UserRecord> {
-    let user: UserRecord = state.db.upsert_user(&wallet_address, &req).await
+    let user: UserRecord = state
+        .db
+        .upsert_user(&wallet_address, &req)
+        .await
         .map_err(|e: anyhow::Error| internal_error(e.to_string()))?;
 
     Ok(Json(ApiResponse::ok(user)))
@@ -77,7 +97,10 @@ pub async fn delete_user(
     State(state): State<Arc<AppState>>,
     Path(wallet_address): Path<String>,
 ) -> AppResult<()> {
-    state.db.delete_user(&wallet_address).await
+    state
+        .db
+        .delete_user(&wallet_address)
+        .await
         .map_err(|e| internal_error(e.to_string()))?;
     Ok(Json(ApiResponse::ok(())))
 }
@@ -88,7 +111,10 @@ pub async fn get_user_stats(
     State(state): State<Arc<AppState>>,
     Path(wallet_address): Path<String>,
 ) -> AppResult<UserStats> {
-    let stats = state.db.get_user_stats(&wallet_address).await
+    let stats = state
+        .db
+        .get_user_stats(&wallet_address)
+        .await
         .map_err(|e| internal_error(e.to_string()))?;
     Ok(Json(ApiResponse::ok(stats)))
 }
@@ -99,9 +125,13 @@ pub async fn get_home_summary(
     State(state): State<Arc<AppState>>,
     Path(wallet_address): Path<String>,
 ) -> AppResult<HomeSummaryResponse> {
-    let stats = state.db.get_user_stats(&wallet_address).await
+    let stats = state
+        .db
+        .get_user_stats(&wallet_address)
+        .await
         .map_err(|e| internal_error(e.to_string()))?;
-    let wagers = state.db
+    let wagers = state
+        .db
         .list_my_wagers(&wallet_address, Some(100), Some(0))
         .await
         .map_err(|e| internal_error(e.to_string()))?;
@@ -123,7 +153,10 @@ pub async fn get_notification_settings(
     State(state): State<Arc<AppState>>,
     Path(wallet_address): Path<String>,
 ) -> AppResult<NotificationSettings> {
-    let settings = state.db.get_notification_settings(&wallet_address).await
+    let settings = state
+        .db
+        .get_notification_settings(&wallet_address)
+        .await
         .map_err(|e| internal_error(e.to_string()))?;
     Ok(Json(ApiResponse::ok(settings)))
 }
@@ -135,7 +168,10 @@ pub async fn update_notification_settings(
     Path(wallet_address): Path<String>,
     Json(req): Json<UpdateNotificationSettings>,
 ) -> AppResult<NotificationSettings> {
-    let settings = state.db.upsert_notification_settings(&wallet_address, &req).await
+    let settings = state
+        .db
+        .upsert_notification_settings(&wallet_address, &req)
+        .await
         .map_err(|e| internal_error(e.to_string()))?;
     Ok(Json(ApiResponse::ok(settings)))
 }
@@ -147,7 +183,10 @@ pub async fn register_push_token(
     Path(wallet_address): Path<String>,
     Json(req): Json<crate::models::RegisterPushTokenRequest>,
 ) -> AppResult<()> {
-    state.db.upsert_push_token(&wallet_address, &req.expo_token).await
+    state
+        .db
+        .upsert_push_token(&wallet_address, &req.expo_token)
+        .await
         .map_err(|e| internal_error(e.to_string()))?;
     Ok(Json(ApiResponse::ok(())))
 }

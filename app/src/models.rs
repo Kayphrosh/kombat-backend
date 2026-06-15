@@ -1,8 +1,8 @@
 // app/src/models.rs
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use uuid::Uuid;
-use chrono::{DateTime, Utc};
 
 // ─── API Request / Response Models ────────────────────────────────────────────
 
@@ -166,18 +166,6 @@ pub struct NotificationListQuery {
     pub offset: Option<i64>,
 }
 
-// ─── Nonce (Solana auth) ───────────────────────────────────────────────────
-
-#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
-pub struct NonceRecord {
-    pub id: uuid::Uuid,
-    pub wallet: String,
-    pub nonce: String,
-    pub used: bool,
-    pub expires_at: chrono::DateTime<chrono::Utc>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-}
-
 // ─── Transaction Response ─────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -200,13 +188,21 @@ pub struct ApiResponse<T: Serialize> {
 
 impl<T: Serialize> ApiResponse<T> {
     pub fn ok(data: T) -> Self {
-        Self { success: true, data: Some(data), error: None }
+        Self {
+            success: true,
+            data: Some(data),
+            error: None,
+        }
     }
 }
 
 impl ApiResponse<()> {
     pub fn err(msg: impl Into<String>) -> Self {
-        Self { success: false, data: None, error: Some(msg.into()) }
+        Self {
+            success: false,
+            data: None,
+            error: Some(msg.into()),
+        }
     }
 }
 
@@ -299,51 +295,108 @@ pub struct MatchRecord {
     pub pandascore_id: Option<i64>,
     pub slug: Option<String>,
     pub name: String,
-    
+
     // Videogame info
     pub videogame_id: Option<i32>,
     pub videogame_name: Option<String>,
     pub videogame_slug: Option<String>,
-    
+
     // League info
     pub league_id: Option<i32>,
     pub league_name: Option<String>,
     pub league_slug: Option<String>,
     pub league_image_url: Option<String>,
-    
+
     // Series info
     pub series_id: Option<i32>,
     pub series_name: Option<String>,
     pub series_full_name: Option<String>,
-    
+
     // Tournament info
     pub tournament_id: Option<i32>,
     pub tournament_name: Option<String>,
     pub tournament_slug: Option<String>,
-    
+
     // Timing
     pub scheduled_at: Option<DateTime<Utc>>,
     pub begin_at: Option<DateTime<Utc>>,
     pub end_at: Option<DateTime<Utc>>,
-    
+
     // Format
     pub match_type: Option<String>,
     pub number_of_games: Option<i32>,
-    
+
     // Status
     pub pandascore_status: String,
     pub status: String,
-    
+
     // Winner
     pub winner_id: Option<i32>,
     pub winner_type: Option<String>,
     pub forfeit: bool,
-    
+
     // Streams
     pub streams_list: Option<JsonValue>,
     pub detailed_stats: bool,
     pub raw_data: Option<JsonValue>,
-    
+
+    // Sui pool object, populated after the Move pool is published/shared.
+    pub sui_network: Option<String>,
+    pub sui_pool_object_id: Option<String>,
+
+    // Source and verification metadata. PandaScore remains supported, while
+    // organizer-created markets and agent proposals use these fields.
+    pub source: String,
+    pub organizer_tournament_id: Option<Uuid>,
+    pub organizer_wallet: Option<String>,
+    pub result_status: String,
+    pub rules_blob_id: Option<String>,
+    pub bracket_blob_id: Option<String>,
+    pub evidence_blob_id: Option<String>,
+    pub evidence_summary: Option<String>,
+    pub verification_status: String,
+
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct OrganizerTournamentRecord {
+    pub id: Uuid,
+    pub organizer_wallet: String,
+    pub name: String,
+    pub videogame_name: Option<String>,
+    pub videogame_slug: Option<String>,
+    pub description: Option<String>,
+    pub rules_blob_id: Option<String>,
+    pub bracket_blob_id: Option<String>,
+    pub evidence_blob_id: Option<String>,
+    pub status: String,
+    pub starts_at: Option<DateTime<Utc>>,
+    pub ends_at: Option<DateTime<Utc>>,
+    pub metadata: JsonValue,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct OrganizerProfileRecord {
+    pub id: Uuid,
+    pub wallet_address: String,
+    pub organization_name: String,
+    pub contact_email: Option<String>,
+    pub website_url: Option<String>,
+    pub country: Option<String>,
+    pub description: Option<String>,
+    pub status: String,
+    pub kyc_status: String,
+    pub kyc_provider: Option<String>,
+    pub kyc_reference_id: Option<String>,
+    pub kyc_session_url: Option<String>,
+    pub rejection_reason: Option<String>,
+    pub reviewed_by: Option<String>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub metadata: JsonValue,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -379,6 +432,7 @@ pub struct PoolStakeRecord {
     pub payout_usdc: Option<i64>,
     pub stake_tx_hash: Option<String>,
     pub payout_tx_hash: Option<String>,
+    pub stake_receipt_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
 }
@@ -451,46 +505,46 @@ pub struct CreateMatchRequest {
     pub pandascore_id: i64,
     pub slug: Option<String>,
     pub name: String,
-    
+
     // Videogame
     pub videogame_id: Option<i32>,
     pub videogame_name: Option<String>,
     pub videogame_slug: Option<String>,
-    
+
     // League
     pub league_id: Option<i32>,
     pub league_name: Option<String>,
     pub league_slug: Option<String>,
     pub league_image_url: Option<String>,
-    
+
     // Series
     pub series_id: Option<i32>,
     pub series_name: Option<String>,
     pub series_full_name: Option<String>,
-    
+
     // Tournament
     pub tournament_id: Option<i32>,
     pub tournament_name: Option<String>,
     pub tournament_slug: Option<String>,
-    
+
     // Timing
     pub scheduled_at: Option<String>,
     pub begin_at: Option<String>,
     pub end_at: Option<String>,
-    
+
     // Format
     pub match_type: Option<String>,
     pub number_of_games: Option<i32>,
-    
+
     // Status
     pub pandascore_status: Option<String>,
-    
+
     // Opponents (2 required for betting)
     pub opponents: Vec<CreateOpponentRequest>,
-    
+
     // Streams
     pub streams_list: Option<JsonValue>,
-    
+
     // Full raw data
     pub raw_data: Option<JsonValue>,
 }
@@ -503,6 +557,246 @@ pub struct CreateOpponentRequest {
     pub acronym: Option<String>,
     pub image_url: Option<String>,
     pub location: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateOrganizerTournamentRequest {
+    pub organizer_wallet: String,
+    pub name: String,
+    pub videogame_name: Option<String>,
+    pub videogame_slug: Option<String>,
+    pub description: Option<String>,
+    pub rules_blob_id: Option<String>,
+    pub bracket_blob_id: Option<String>,
+    pub evidence_blob_id: Option<String>,
+    pub starts_at: Option<String>,
+    pub ends_at: Option<String>,
+    pub metadata: Option<JsonValue>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OrganizerTournamentQuery {
+    pub organizer_wallet: Option<String>,
+    pub status: Option<String>,
+    pub videogame: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateOrganizerMatchRequest {
+    pub organizer_wallet: String,
+    pub name: String,
+    pub scheduled_at: Option<String>,
+    pub begin_at: Option<String>,
+    pub end_at: Option<String>,
+    pub match_type: Option<String>,
+    pub number_of_games: Option<i32>,
+    pub rules_blob_id: Option<String>,
+    pub bracket_blob_id: Option<String>,
+    pub evidence_blob_id: Option<String>,
+    pub streams_list: Option<JsonValue>,
+    pub opponents: Vec<CreateOpponentRequest>,
+    pub metadata: Option<JsonValue>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct OutcomeProposalRecord {
+    pub id: Uuid,
+    pub match_id: Uuid,
+    pub proposed_winner_opponent_id: Option<Uuid>,
+    pub proposed_winner_name: Option<String>,
+    pub source: String,
+    pub proposer_wallet: Option<String>,
+    pub confidence: Option<rust_decimal::Decimal>,
+    pub status: String,
+    pub evidence_blob_id: Option<String>,
+    pub evidence_url: Option<String>,
+    pub evidence_summary: Option<String>,
+    pub raw_data: JsonValue,
+    pub created_at: DateTime<Utc>,
+    pub reviewed_at: Option<DateTime<Utc>>,
+    pub reviewer_wallet: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateOutcomeProposalRequest {
+    pub proposer_wallet: Option<String>,
+    pub proposed_winner_opponent_id: Option<String>,
+    pub proposed_winner_name: Option<String>,
+    pub source: Option<String>,
+    pub confidence: Option<rust_decimal::Decimal>,
+    pub evidence_blob_id: Option<String>,
+    pub evidence_url: Option<String>,
+    pub evidence_summary: Option<String>,
+    pub raw_data: Option<JsonValue>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewOutcomeProposalRequest {
+    pub reviewer_wallet: Option<String>,
+    pub decision: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OrganizerApplyRequest {
+    pub wallet_address: String,
+    pub organization_name: String,
+    pub contact_email: Option<String>,
+    pub website_url: Option<String>,
+    pub country: Option<String>,
+    pub description: Option<String>,
+    pub metadata: Option<JsonValue>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct OrganizerKycSessionRequest {
+    pub wallet_address: String,
+    pub provider: Option<String>,
+    pub return_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OrganizerKycSessionResponse {
+    pub organizer: OrganizerProfileRecord,
+    pub provider: String,
+    pub reference_id: String,
+    pub session_url: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewOrganizerRequest {
+    pub status: String,
+    pub kyc_status: Option<String>,
+    pub kyc_provider: Option<String>,
+    pub kyc_reference_id: Option<String>,
+    pub kyc_session_url: Option<String>,
+    pub rejection_reason: Option<String>,
+    pub reviewed_by: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminOrganizerQuery {
+    pub status: Option<String>,
+    pub kyc_status: Option<String>,
+    pub country: Option<String>,
+    pub search: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminOutcomeProposalQuery {
+    pub status: Option<String>,
+    pub source: Option<String>,
+    pub match_id: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+// ─── Walrus Artifacts / Agents ───────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct WalrusArtifactRecord {
+    pub id: Uuid,
+    pub blob_id: String,
+    pub object_id: Option<String>,
+    pub artifact_type: String,
+    pub owner_wallet: Option<String>,
+    pub match_id: Option<Uuid>,
+    pub outcome_proposal_id: Option<Uuid>,
+    pub content_type: String,
+    pub size_bytes: i64,
+    pub aggregator_url: Option<String>,
+    pub publisher_url: Option<String>,
+    pub metadata: JsonValue,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateWalrusArtifactRequest {
+    pub artifact_type: String,
+    pub owner_wallet: Option<String>,
+    pub match_id: Option<String>,
+    pub outcome_proposal_id: Option<String>,
+    pub content_type: Option<String>,
+    pub manifest: JsonValue,
+    pub metadata: Option<JsonValue>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalrusArtifactResponse {
+    #[serde(flatten)]
+    pub artifact: WalrusArtifactRecord,
+    pub blob_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalrusConfigResponse {
+    pub enabled: bool,
+    pub configured: bool,
+    pub network: String,
+    pub aggregator_url: Option<String>,
+    pub max_upload_bytes: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalrusBlobUrlResponse {
+    pub blob_id: String,
+    pub url: String,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct AgentRunRecord {
+    pub id: Uuid,
+    pub match_id: Option<Uuid>,
+    pub agent_name: String,
+    pub agent_id: Option<String>,
+    pub status: String,
+    pub watch_sources: JsonValue,
+    pub evidence_blob_id: Option<String>,
+    pub evidence_url: Option<String>,
+    pub outcome_proposal_id: Option<Uuid>,
+    pub proposed_winner_opponent_id: Option<Uuid>,
+    pub proposed_winner_name: Option<String>,
+    pub confidence: Option<rust_decimal::Decimal>,
+    pub summary: Option<String>,
+    pub error: Option<String>,
+    pub verification_status: Option<String>,
+    pub verification_note: Option<String>,
+    pub raw_output: JsonValue,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentOutcomeProposalRequest {
+    pub match_id: String,
+    pub agent_name: Option<String>,
+    /// Stable identifier for the submitting agent. When omitted, the id is
+    /// resolved from the authenticating agent token.
+    pub agent_id: Option<String>,
+    pub watch_sources: Option<JsonValue>,
+    pub proposed_winner_opponent_id: Option<String>,
+    pub proposed_winner_name: Option<String>,
+    pub confidence: Option<rust_decimal::Decimal>,
+    pub evidence_blob_id: Option<String>,
+    pub evidence_url: Option<String>,
+    pub evidence_summary: Option<String>,
+    pub raw_output: Option<JsonValue>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AdminAgentRunQuery {
+    pub status: Option<String>,
+    pub agent_name: Option<String>,
+    pub agent_id: Option<String>,
+    pub match_id: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
 }
 
 /// Place a stake on a match outcome
@@ -561,20 +855,360 @@ pub enum ResolveResult {
 
 #[derive(Debug, Deserialize)]
 pub struct MatchListQuery {
-    pub status: Option<String>,       // upcoming, live, completed, cancelled
-    pub videogame: Option<String>,    // Filter by videogame slug
+    pub status: Option<String>,    // upcoming, live, completed, cancelled
+    pub videogame: Option<String>, // Filter by videogame slug
     pub league_id: Option<i32>,
-    pub search: Option<String>,       // Search in name
+    pub search: Option<String>, // Search in name
     pub limit: Option<i64>,
     pub offset: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PandaScoreSyncRequest {
+    pub statuses: Option<Vec<String>>,
+    pub videogame_slugs: Option<Vec<String>>,
+    pub max_pages: Option<u32>,
+    pub per_page: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PandaScoreSyncResponse {
+    pub provider: String,
+    pub fetched: usize,
+    pub synced: usize,
+    pub skipped: usize,
+    pub resolved: usize,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PandaScoreSourceResponse {
+    pub provider: String,
+    pub enabled: bool,
+    pub configured: bool,
+    pub base_url: String,
+    pub default_statuses: Vec<String>,
+    pub default_videogame_slugs: Vec<String>,
+    pub default_per_page: u32,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct StakeListQuery {
-    pub status: Option<String>,       // active, won, lost, refunded
+    pub status: Option<String>, // active, won, lost, refunded
     pub match_id: Option<String>,
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WalletDashboardQuery {
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+// ─── Wallet Dashboard ────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize)]
+pub struct WalletDashboardResponse {
+    pub network: String,
+    pub wallet: String,
+    pub usdc_coin_type: Option<String>,
+    pub available_balance_usdc: i64,
+    pub locked_in_kombats_usdc: i64,
+    pub total_balance_usdc: i64,
+    pub transaction_history: Vec<WalletTransactionItem>,
+    pub actions: WalletActionConfig,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalletActionConfig {
+    pub fund_wallet: WalletAction,
+    pub withdraw: WalletAction,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WalletAction {
+    pub enabled: bool,
+    pub provider: String,
+    pub requires_frontend_wallet: bool,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct WalletTransactionItem {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub subtitle: Option<String>,
+    pub amount_usdc: i64,
+    pub direction: String,
+    pub status: String,
+    pub tx_hash: Option<String>,
+    pub occurred_at: DateTime<Utc>,
+}
+
+// ─── Transak On-Ramp Fallback ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct TransakWidgetRequest {
+    pub wallet_address: String,
+    pub product: Option<String>,       // BUY
+    pub fiat_currency: Option<String>, // default USD
+    pub fiat_amount: Option<rust_decimal::Decimal>,
+    pub crypto_currency_code: Option<String>, // default USDC
+    pub crypto_amount: Option<rust_decimal::Decimal>,
+    pub network: Option<String>, // default sui
+    pub payment_method: Option<String>,
+    pub email: Option<String>,
+    pub partner_order_id: Option<String>,
+    pub partner_customer_id: Option<String>,
+    pub redirect_url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransakWidgetResponse {
+    pub provider: String,
+    pub product: String,
+    pub wallet_address: String,
+    pub widget_url: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TransakQuoteRequest {
+    pub product: Option<String>,       // BUY
+    pub fiat_currency: Option<String>, // default USD
+    pub fiat_amount: Option<rust_decimal::Decimal>,
+    pub crypto_currency_code: Option<String>, // default USDC
+    pub crypto_amount: Option<rust_decimal::Decimal>,
+    pub network: Option<String>, // default sui
+    pub payment_method: Option<String>,
+    pub country_code: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransakQuoteResponse {
+    pub raw: serde_json::Value,
+}
+
+// ─── Generic Ramp Provider Layer ─────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct RampProviderQuery {
+    pub country: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RampProvidersResponse {
+    pub primary_provider: String,
+    pub default_network: String,
+    pub default_crypto_currency: String,
+    pub default_fiat_currency: String,
+    pub partner_fee_bps: u16,
+    pub country: Option<String>,
+    pub providers: Vec<crate::services::ramp::RampProvider>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RampSessionRequest {
+    pub wallet_address: String,
+    pub product: Option<String>,       // BUY
+    pub fiat_currency: Option<String>, // default USD
+    pub fiat_amount: Option<rust_decimal::Decimal>,
+    pub crypto_currency_code: Option<String>, // default USDC
+    pub crypto_amount: Option<rust_decimal::Decimal>,
+    pub network: Option<String>, // default sui
+}
+
+#[derive(Debug, Serialize)]
+pub struct RampSessionResponse {
+    pub provider: String,
+    pub product: String,
+    pub wallet_address: String,
+    pub launch_method: String,
+    pub client_action: String,
+    pub network: String,
+    pub crypto_currency_code: String,
+    pub fiat_currency: String,
+    pub fiat_amount: Option<rust_decimal::Decimal>,
+    pub crypto_amount: Option<rust_decimal::Decimal>,
+    pub note: String,
+}
+
+// ─── Programmable Payment Intents ────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct PaymentIntentRecord {
+    pub id: Uuid,
+    pub user_wallet: String,
+    pub kind: String,
+    pub status: String,
+    pub network: String,
+    pub match_id: Uuid,
+    pub opponent_id: Uuid,
+    pub amount_usdc: i64,
+    pub reserve_balance_usdc: i64,
+    pub settlement_rule: String,
+    pub current_balance_usdc: Option<i64>,
+    pub funding_shortfall_usdc: i64,
+    pub stake_tx_hash: Option<String>,
+    pub stake_receipt_id: Option<String>,
+    pub metadata: JsonValue,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreatePaymentIntentRequest {
+    pub wallet_address: String,
+    pub match_id: String,
+    pub opponent_id: String,
+    pub amount_usdc: i64,
+    pub network: Option<String>,
+    pub reserve_balance_usdc: Option<i64>,
+    pub settlement_rule: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaymentIntentFunding {
+    pub current_balance_usdc: i64,
+    pub required_balance_usdc: i64,
+    pub funding_shortfall_usdc: i64,
+    pub onramp_required: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaymentIntentRule {
+    pub rule_type: String,
+    pub amount_usdc: i64,
+    pub description: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaymentIntentResponse {
+    pub intent: PaymentIntentRecord,
+    pub funding: PaymentIntentFunding,
+    pub rules: Vec<PaymentIntentRule>,
+    pub match_name: String,
+    pub opponent_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaymentIntentOnrampResponse {
+    pub intent: PaymentIntentResponse,
+    pub onramp_required: bool,
+    pub ramp_session: Option<RampSessionResponse>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaymentPtbStep {
+    pub kind: String,
+    pub description: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaymentPtbArgument {
+    pub name: String,
+    pub kind: String,
+    pub value: Option<JsonValue>,
+    pub source: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaymentMoveCall {
+    pub target: String,
+    pub package_id: String,
+    pub module: String,
+    pub function: String,
+    pub type_arguments: Vec<String>,
+    pub arguments: Vec<PaymentPtbArgument>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PaymentIntentPtbResponse {
+    pub intent_id: Uuid,
+    pub network: String,
+    pub can_build: bool,
+    pub reason: Option<String>,
+    pub coin_type: Option<String>,
+    pub amount_usdc: i64,
+    pub reserve_balance_usdc: i64,
+    pub expected_receipt_type: String,
+    pub steps: Vec<PaymentPtbStep>,
+    pub move_call: Option<PaymentMoveCall>,
+}
+
+// ─── Stake Receipt Secondary Market ──────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
+pub struct ReceiptMarketListingRecord {
+    pub id: Uuid,
+    pub network: String,
+    pub seller_wallet: String,
+    pub buyer_wallet: Option<String>,
+    pub receipt_id: String,
+    pub listing_object_id: Option<String>,
+    pub match_id: Uuid,
+    pub opponent_id: Uuid,
+    pub ask_amount_usdc: i64,
+    pub status: String,
+    pub listing_tx_hash: Option<String>,
+    pub sale_tx_hash: Option<String>,
+    pub metadata: JsonValue,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateReceiptListingRequest {
+    pub wallet_address: String,
+    pub receipt_id: String,
+    pub match_id: String,
+    pub opponent_id: String,
+    pub ask_amount_usdc: i64,
+    pub network: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReceiptListingQuery {
+    pub match_id: Option<String>,
+    pub seller_wallet: Option<String>,
+    pub status: Option<String>,
+    pub limit: Option<i64>,
+    pub offset: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ActivateReceiptListingRequest {
+    pub wallet_address: String,
+    pub listing_object_id: String,
+    pub listing_tx_hash: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MarkReceiptListingSoldRequest {
+    pub buyer_wallet: String,
+    pub sale_tx_hash: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReceiptListingResponse {
+    pub listing: ReceiptMarketListingRecord,
+    pub match_name: String,
+    pub opponent_name: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReceiptMarketPtbResponse {
+    pub listing_id: Uuid,
+    pub network: String,
+    pub can_build: bool,
+    pub reason: Option<String>,
+    pub coin_type: Option<String>,
+    pub expected_receipt_type: String,
+    pub steps: Vec<PaymentPtbStep>,
+    pub move_call: Option<PaymentMoveCall>,
 }
 
 // ─── User Stake Summary ──────────────────────────────────────────────────────
@@ -617,6 +1251,7 @@ pub struct StakeWithMatchRow {
     pub payout_usdc: Option<i64>,
     pub stake_tx_hash: Option<String>,
     pub payout_tx_hash: Option<String>,
+    pub stake_receipt_id: Option<String>,
     pub created_at: DateTime<Utc>,
     pub resolved_at: Option<DateTime<Utc>>,
     // Joined fields
@@ -642,6 +1277,7 @@ impl StakeWithMatchRow {
                 payout_usdc: self.payout_usdc,
                 stake_tx_hash: self.stake_tx_hash,
                 payout_tx_hash: self.payout_tx_hash,
+                stake_receipt_id: self.stake_receipt_id,
                 created_at: self.created_at,
                 resolved_at: self.resolved_at,
             },

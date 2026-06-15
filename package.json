@@ -18,8 +18,5 @@
     "url": "https://github.com/Kayphrosh/kombat-backend/issues"
   },
   "homepage": "https://github.com/Kayphrosh/kombat-backend#readme",
-  "dependencies": {
-    "@coral-xyz/anchor": "^0.32.1",
-    "@solana/web3.js": "^1.98.4"
-  }
+  "dependencies": {}
 }

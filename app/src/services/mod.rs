@@ -1,20 +1,24 @@
 // app/src/services/mod.rs
-pub mod db;
-pub mod solana;
-pub mod indexer;
+pub mod agent_pipeline;
 pub mod auth;
 #[cfg(test)]
 mod auth_tests;
-#[cfg(test)]
-mod auth_unit_tests;
-pub mod redis;
+pub mod db;
 pub mod dynamic;
-pub mod upload;
+pub mod pandascore;
+pub mod poller;
 pub mod push;
-
+pub mod ramp;
+pub mod sui;
+pub mod transak;
+pub mod upload;
+pub mod walrus;
 
 pub use db::DbService;
-pub use solana::SolanaService;
-pub use indexer::IndexerService;
 pub use dynamic::DynamicService;
+pub use pandascore::{PandaScoreConfig, PandaScoreService};
+pub use ramp::{RampConfig, RampService};
+pub use sui::{SuiConfig, SuiService};
+pub use transak::{TransakConfig, TransakService};
 pub use upload::UploadService;
+pub use walrus::{WalrusConfig, WalrusService};

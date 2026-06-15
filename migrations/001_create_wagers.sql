@@ -5,7 +5,7 @@ CREATE EXTENSION IF NOT EXISTS "pgcrypto";
 
 CREATE TABLE IF NOT EXISTS wagers (
     id                 UUID         PRIMARY KEY DEFAULT gen_random_uuid(),
-    on_chain_address   VARCHAR(44)  NOT NULL UNIQUE,  -- Solana PDA (base58)
+    on_chain_address   VARCHAR(44)  NOT NULL UNIQUE,
     wager_id           BIGINT       NOT NULL,
     initiator          VARCHAR(44)  NOT NULL,
     challenger         VARCHAR(44),

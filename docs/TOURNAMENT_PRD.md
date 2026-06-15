@@ -296,7 +296,7 @@ Enable users to stake USDC on tournament outcomes through a parimutuel betting s
 │  🟢  @CryptoKing staked $500 on Team Alpha        2m ago   │
 │  🔵  @GameMaster staked $75 on Team Omega         5m ago   │
 │  🟢  @LuckyBet staked $200 on Team Alpha         12m ago   │
-│  🔵  @SolanaSam staked $150 on Team Omega        18m ago   │
+│  🔵  @SuiSam staked $150 on Team Omega           18m ago   │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```

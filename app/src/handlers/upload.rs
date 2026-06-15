@@ -1,14 +1,10 @@
-use axum::{
-    extract::State,
-    http::StatusCode,
-    Json,
-};
+use axum::{extract::State, http::StatusCode, Json};
 use axum_extra::extract::Multipart;
 use std::sync::Arc;
 
 use crate::{
-    handlers::wager::AppState,
     models::{ApiResponse, UploadResponse},
+    state::AppState,
 };
 
 type AppResult<T> = Result<Json<ApiResponse<T>>, (StatusCode, Json<ApiResponse<()>>)>;
@@ -18,7 +14,10 @@ fn bad_request(msg: impl Into<String>) -> (StatusCode, Json<ApiResponse<()>>) {
 }
 
 fn internal_error(msg: impl Into<String>) -> (StatusCode, Json<ApiResponse<()>>) {
-    (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::err(msg)))
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiResponse::err(msg)),
+    )
 }
 
 /// POST /api/uploads
@@ -36,11 +35,17 @@ pub async fn upload_file(
         match name.as_str() {
             "file" => {
                 file_name = field.file_name().map(|s| s.to_string());
-                let bytes = field.bytes().await.map_err(|e| bad_request(format!("Failed to read file: {}", e)))?;
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| bad_request(format!("Failed to read file: {}", e)))?;
                 file_data = Some(bytes.to_vec());
             }
             "type" => {
-                let text = field.text().await.map_err(|e| bad_request(format!("Failed to read type: {}", e)))?;
+                let text = field
+                    .text()
+                    .await
+                    .map_err(|e| bad_request(format!("Failed to read type: {}", e)))?;
                 file_type = text;
             }
             _ => {} // ignore unknown fields
@@ -50,10 +55,13 @@ pub async fn upload_file(
     let data = file_data.ok_or_else(|| bad_request("Missing 'file' field"))?;
     let original_name = file_name.unwrap_or_else(|| "upload.bin".to_string());
 
-    let upload_svc = state.upload_service.as_ref()
+    let upload_svc = state
+        .upload_service
+        .as_ref()
         .ok_or_else(|| internal_error("Upload service not configured"))?;
 
-    let url = upload_svc.save_file(data, &original_name, &file_type)
+    let url = upload_svc
+        .save_file(data, &original_name, &file_type)
         .await
         .map_err(|e| bad_request(e.to_string()))?;
 
