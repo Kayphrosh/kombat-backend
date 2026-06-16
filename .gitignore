@@ -11,3 +11,7 @@ dist/
 .vscode/
 platform-signer.json
 sui/build/
+sui-wager/build/
+
+# Markdown docs
+*.md

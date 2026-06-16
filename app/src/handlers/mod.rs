@@ -12,5 +12,6 @@ pub mod tournament;
 pub mod transak;
 pub mod upload;
 pub mod user;
+pub mod wager;
 pub mod walrus;
 pub mod webhook;

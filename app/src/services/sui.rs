@@ -17,8 +17,11 @@ pub struct SuiNetworkConfig {
     pub network: String,
     pub rpc_url: String,
     pub package_id: Option<String>,
+    /// Wager lives in its own published package (separate from staking).
+    pub wager_package_id: Option<String>,
     pub usdc_coin_type: Option<String>,
     pub staking_module: String,
+    pub wager_module: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -106,6 +109,53 @@ impl SuiService {
 
     pub fn active_config(&self) -> &SuiNetworkConfig {
         self.config.active_network()
+    }
+
+    /// Submit an on-chain `wager::resolve_wager` call signed by the platform
+    /// signer. The signer must equal the wager's on-chain `resolver` and must
+    /// hold SUI for gas. Returns the transaction digest on success.
+    pub async fn resolve_wager_on_chain(
+        &self,
+        network: &str,
+        wager_object_id: &str,
+        winner: &str,
+    ) -> anyhow::Result<String> {
+        let cfg = self
+            .config
+            .network(network)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported Sui network: {}", network))?;
+        let package = cfg
+            .wager_package_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("wager_package_id not configured for {}", network))?;
+        let coin_type = cfg
+            .usdc_coin_type
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("usdc_coin_type not configured for {}", network))?;
+
+        let signer = crate::services::sui_tx::PlatformSigner::from_env()
+            .ok_or_else(|| anyhow::anyhow!("PLATFORM_SIGNER_KEYPAIR not configured"))?;
+
+        signer
+            .move_call_execute(
+                &self.client,
+                &cfg.rpc_url,
+                &package,
+                &cfg.wager_module,
+                "resolve_wager",
+                vec![coin_type],
+                vec![
+                    serde_json::json!(wager_object_id),
+                    serde_json::json!(winner),
+                    serde_json::json!("0x6"), // Clock
+                ],
+                100_000_000, // 0.1 SUI gas budget
+            )
+            .await
+    }
+
+    pub fn platform_signer_address() -> Option<String> {
+        crate::services::sui_tx::PlatformSigner::from_env().map(|s| s.address().to_string())
     }
 
     pub fn normalize_address(address: &str) -> Option<String> {
@@ -252,6 +302,11 @@ fn network_from_env(network: &str, active_network: &str) -> SuiNetworkConfig {
         active_prefix.get(1).cloned().unwrap_or_default(),
     ]);
 
+    let wager_package_id = env_first(&[
+        format!("{}_WAGER_PACKAGE_ID", prefix),
+        "SUI_WAGER_PACKAGE_ID".to_string(),
+    ]);
+
     let usdc_coin_type = env_first(&[
         format!("{}_USDC_COIN_TYPE", prefix),
         active_prefix.get(2).cloned().unwrap_or_default(),
@@ -262,9 +317,11 @@ fn network_from_env(network: &str, active_network: &str) -> SuiNetworkConfig {
         network: network.to_string(),
         rpc_url,
         package_id,
+        wager_package_id,
         usdc_coin_type,
         staking_module: std::env::var("SUI_STAKING_MODULE")
             .unwrap_or_else(|_| "tournament_staking".to_string()),
+        wager_module: std::env::var("SUI_WAGER_MODULE").unwrap_or_else(|_| "wager".to_string()),
     }
 }
 

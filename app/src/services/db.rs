@@ -1547,6 +1547,21 @@ impl DbService {
         Ok(row)
     }
 
+    /// List Walrus artifacts linked to a wager via `metadata->>'wager_address'`.
+    pub async fn list_walrus_artifacts_for_wager(
+        &self,
+        wager_address: &str,
+    ) -> Result<Vec<crate::models::WalrusArtifactRecord>> {
+        Ok(sqlx::query_as::<_, crate::models::WalrusArtifactRecord>(
+            r#"SELECT * FROM walrus_artifacts
+               WHERE metadata->>'wager_address' = $1
+               ORDER BY created_at DESC"#,
+        )
+        .bind(wager_address)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     pub async fn get_walrus_artifact(
         &self,
         artifact_id: uuid::Uuid,

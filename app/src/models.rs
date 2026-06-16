@@ -6,8 +6,13 @@ use uuid::Uuid;
 
 // ─── API Request / Response Models ────────────────────────────────────────────
 
+/// Index a P2P wager after it has been created on-chain by the client wallet.
+/// The backend tracks state and the social layer (accept, declared winners,
+/// disputes, win/loss); the on-chain wager object is created client-side.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateWagerRequest {
+    pub on_chain_address: String,
+    pub wager_id: i64,
     pub initiator: String,
     pub stake_usdc: u64,
     pub description: String,
@@ -16,9 +21,50 @@ pub struct CreateWagerRequest {
     pub resolver: String,
     pub challenger_address: Option<String>,
     pub initiator_option: Option<String>,
+    pub protocol_fee_bps: Option<i16>,
     pub oracle_feed: Option<String>,
     pub oracle_target: Option<i64>,
-    pub oracle_initiator_wins_above: Option<bool>,
+    /// Optional wager terms/agreement to store durably on Walrus.
+    pub terms: Option<JsonValue>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateWagerStatusRequest {
+    pub status: String,
+}
+
+/// Build the on-chain transaction to create a P2P wager (before the wager
+/// object exists). Mirrors the payment-intent PTB pattern.
+#[derive(Debug, Deserialize)]
+pub struct WagerCreatePtbRequest {
+    pub initiator: String,
+    pub stake_usdc: i64,
+    pub description: String,
+    pub expiry_ts: i64,
+    pub resolver: String,
+    pub network: Option<String>,
+    pub challenger_address: Option<String>,
+    pub initiator_option: Option<String>,
+}
+
+/// Declared winner for the resolve-PTB.
+#[derive(Debug, Deserialize)]
+pub struct WagerResolvePtbQuery {
+    pub winner: String,
+}
+
+/// Generic wager PTB response (reuses the payment PTB building blocks).
+#[derive(Debug, Serialize)]
+pub struct WagerPtbResponse {
+    pub wager_address: Option<String>,
+    pub network: String,
+    pub can_build: bool,
+    pub reason: Option<String>,
+    pub coin_type: Option<String>,
+    pub package_id: Option<String>,
+    pub expected_object_type: String,
+    pub steps: Vec<PaymentPtbStep>,
+    pub move_call: Option<PaymentMoveCall>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -61,6 +107,9 @@ pub struct DisputeSubmissionRequest {
     pub description: String,
     pub evidence_url: Option<String>,
     pub declared_winner: Option<String>,
+    /// Optional structured evidence to store durably on Walrus. When present,
+    /// the resulting aggregator URL is saved as `evidence_url`.
+    pub evidence: Option<JsonValue>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
