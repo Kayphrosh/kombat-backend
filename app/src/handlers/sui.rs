@@ -32,8 +32,10 @@ pub struct SuiConfigResponse {
     pub network: String,
     pub rpc_url: String,
     pub package_id: Option<String>,
+    pub wager_package_id: Option<String>,
     pub usdc_coin_type: Option<String>,
     pub staking_module: String,
+    pub wager_module: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -297,7 +299,9 @@ fn sui_config_response(config: &crate::services::sui::SuiNetworkConfig) -> SuiCo
         network: config.network.clone(),
         rpc_url: config.rpc_url.clone(),
         package_id: config.package_id.clone(),
+        wager_package_id: config.wager_package_id.clone(),
         usdc_coin_type: config.usdc_coin_type.clone(),
         staking_module: config.staking_module.clone(),
+        wager_module: config.wager_module.clone(),
     }
 }

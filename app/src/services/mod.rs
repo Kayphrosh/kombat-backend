@@ -10,6 +10,7 @@ pub mod poller;
 pub mod push;
 pub mod ramp;
 pub mod sui;
+pub mod sui_tx;
 pub mod transak;
 pub mod upload;
 pub mod walrus;

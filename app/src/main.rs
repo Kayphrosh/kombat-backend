@@ -61,6 +61,11 @@ use handlers::walrus::{
     create_walrus_artifact, get_walrus_artifact, get_walrus_blob_url, get_walrus_config,
 };
 use handlers::webhook::{handle_match_result_webhook, handle_pandascore_webhook};
+use handlers::wager::{
+    accept_wager, accept_wager_ptb, create_wager, create_wager_ptb, declare_winner, get_wager,
+    list_disputes, list_my_wagers, list_wager_artifacts, list_wagers, resolve_wager_ptb,
+    submit_dispute, update_wager_status,
+};
 use prometheus::{Encoder, IntCounter, TextEncoder};
 use services::{
     DbService, PandaScoreConfig, PandaScoreService, RampConfig, RampService, SuiConfig, SuiService,
@@ -331,6 +336,21 @@ async fn main() -> anyhow::Result<()> {
             post(handle_match_result_webhook),
         )
         .route("/api/webhooks/pandascore", post(handle_pandascore_webhook))
+        // ── P2P wagers (1-v-1) ───────────────────────────────────────────────
+        .route("/api/wagers", get(list_wagers).post(create_wager))
+        .route("/api/wagers/mine", get(list_my_wagers))
+        .route("/api/wagers/create-ptb", post(create_wager_ptb))
+        .route("/api/wagers/:address", get(get_wager))
+        .route("/api/wagers/:address/accept", post(accept_wager))
+        .route("/api/wagers/:address/accept-ptb", get(accept_wager_ptb))
+        .route("/api/wagers/:address/resolve-ptb", get(resolve_wager_ptb))
+        .route("/api/wagers/:address/status", post(update_wager_status))
+        .route("/api/wagers/:address/declare-winner", post(declare_winner))
+        .route("/api/wagers/:address/artifacts", get(list_wager_artifacts))
+        .route(
+            "/api/wagers/:address/disputes",
+            get(list_disputes).post(submit_dispute),
+        )
         // ── Tournament / Match Betting (Pool Staking) ────────────────────────
         .route(
             "/api/tournaments",
@@ -438,6 +458,7 @@ async fn health_handler(
         "sui": {
             "active_network": sui.active_network.clone(),
             "networks": sui.networks.clone(),
+            "platform_signer_address": services::SuiService::platform_signer_address(),
         },
         "transak": {
             "enabled": transak.enabled,
