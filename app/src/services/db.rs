@@ -960,11 +960,12 @@ impl DbService {
                 scheduled_at, begin_at, end_at,
                 match_type, number_of_games,
                 pandascore_status, status,
-                streams_list, raw_data
+                streams_list, raw_data,
+                sui_network, sui_pool_object_id
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                 $11, $12, $13, $14, $15, $16, $17, $18, $19,
-                $20, $21, $22, $23, $24, $25
+                $20, $21, $22, $23, $24, $25, $26, $27
             )
             ON CONFLICT (pandascore_id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -979,6 +980,8 @@ impl DbService {
                 END,
                 streams_list = EXCLUDED.streams_list,
                 raw_data = EXCLUDED.raw_data,
+                sui_network = COALESCE(EXCLUDED.sui_network, matches.sui_network),
+                sui_pool_object_id = COALESCE(EXCLUDED.sui_pool_object_id, matches.sui_pool_object_id),
                 updated_at = NOW()
             RETURNING *"#,
         )
@@ -1007,6 +1010,8 @@ impl DbService {
         .bind(status)
         .bind(&req.streams_list)
         .bind(&req.raw_data)
+        .bind(&req.sui_network)
+        .bind(&req.sui_pool_object_id)
         .fetch_one(&self.pool)
         .await?;
 
@@ -1818,6 +1823,7 @@ impl DbService {
         let total_stakers: i64 = opponents.iter().map(|o| o.staker_count).sum();
 
         Ok(Some(crate::models::MatchWithOdds {
+            pool_configured: match_record.sui_pool_object_id.is_some(),
             match_info: match_record,
             opponents,
             total_pool_usdc,
@@ -1836,6 +1842,30 @@ impl DbService {
         .bind(pandascore_id)
         .fetch_optional(&self.pool)
         .await?;
+        Ok(row)
+    }
+
+    pub async fn configure_match_pool(
+        &self,
+        match_id: uuid::Uuid,
+        sui_network: Option<&str>,
+        sui_pool_object_id: &str,
+    ) -> Result<crate::models::MatchRecord> {
+        let row = sqlx::query_as::<_, crate::models::MatchRecord>(
+            r#"UPDATE matches
+               SET sui_network = COALESCE($2, sui_network),
+                   sui_pool_object_id = $3,
+                   updated_at = NOW()
+               WHERE id = $1
+               RETURNING *"#,
+        )
+        .bind(match_id)
+        .bind(sui_network)
+        .bind(sui_pool_object_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("Match not found"))?;
+
         Ok(row)
     }
 
@@ -1969,6 +1999,14 @@ impl DbService {
             qb.push(" AND league_id = ").push_bind(league_id);
         }
 
+        if let Some(pool_configured) = query.pool_configured {
+            if pool_configured {
+                qb.push(" AND sui_pool_object_id IS NOT NULL");
+            } else {
+                qb.push(" AND sui_pool_object_id IS NULL");
+            }
+        }
+
         if let Some(ref search) = query.search {
             let escaped = search
                 .replace('\\', "\\\\")
@@ -1995,6 +2033,7 @@ impl DbService {
             let total_stakers: i64 = opponents.iter().map(|o| o.staker_count).sum();
 
             result.push(crate::models::MatchWithOdds {
+                pool_configured: m.sui_pool_object_id.is_some(),
                 match_info: m,
                 opponents,
                 total_pool_usdc,
@@ -2263,6 +2302,9 @@ impl DbService {
                 "Match is not accepting stakes (status: {})",
                 match_record.status
             );
+        }
+        if match_record.sui_pool_object_id.is_none() {
+            anyhow::bail!("Match pool is not configured for on-chain staking");
         }
 
         // Verify opponent belongs to this match
