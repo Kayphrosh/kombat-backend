@@ -169,7 +169,7 @@ pub async fn sync_pandascore_tournaments(
 pub async fn create_tournament(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Json(req): Json<CreateMatchRequest>,
+    Json(mut req): Json<CreateMatchRequest>,
 ) -> AppResult<MatchWithOdds> {
     // Require authenticated user to prevent spam
     let _wallet = extract_wallet_from_jwt(&headers)?;
@@ -178,25 +178,29 @@ pub async fn create_tournament(
     if req.opponents.len() != 2 {
         return Err(bad_request("Exactly 2 opponents required for betting"));
     }
-
-    // Check if match already exists
-    if let Some(existing) = state
-        .db
-        .get_match_by_pandascore_id(req.pandascore_id)
-        .await
-        .map_err(|e| internal_error(e.to_string()))?
-    {
-        // Return existing match with odds
-        let match_with_odds = state
-            .db
-            .get_match_with_odds(&existing.id.to_string())
-            .await
-            .map_err(|e| internal_error(e.to_string()))?
-            .ok_or_else(|| internal_error("Match not found after lookup"))?;
-        return Ok(Json(ApiResponse::ok(match_with_odds)));
+    if req.sui_pool_object_id.is_some() || req.sui_network.is_some() {
+        verify_admin(&headers)?;
+        if let Some(pool_object_id) = req.sui_pool_object_id.as_ref() {
+            req.sui_pool_object_id = Some(
+                SuiService::normalize_address(pool_object_id)
+                    .ok_or_else(|| bad_request("Invalid Sui pool object id"))?,
+            );
+        }
+        if let Some(network) = req.sui_network.as_ref() {
+            req.sui_network = Some(
+                state
+                    .sui
+                    .config()
+                    .network(network)
+                    .ok_or_else(|| bad_request("Unsupported Sui network"))?
+                    .network
+                    .clone(),
+            );
+        }
     }
 
-    // Create new match
+    // Create or update match. Pool metadata is preserved unless the request
+    // carries a newly indexed Sui pool object.
     let match_record = state
         .db
         .upsert_match(&req)
@@ -279,6 +283,43 @@ pub async fn get_tournament(
         .await
         .map_err(|e| internal_error(e.to_string()))?
         .ok_or_else(|| not_found("Tournament not found"))?;
+
+    Ok(Json(ApiResponse::ok(match_with_odds)))
+}
+
+pub async fn configure_tournament_pool(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<ConfigureMatchPoolRequest>,
+) -> AppResult<MatchWithOdds> {
+    verify_admin(&headers)?;
+
+    let match_uuid =
+        uuid::Uuid::parse_str(&id).map_err(|_| bad_request("Invalid tournament id"))?;
+    let pool_object_id = SuiService::normalize_address(&req.sui_pool_object_id)
+        .ok_or_else(|| bad_request("Invalid Sui pool object id"))?;
+    let sui_network = req
+        .sui_network
+        .unwrap_or_else(|| state.sui.config().active_network.clone());
+    let network_config = state
+        .sui
+        .config()
+        .network(&sui_network)
+        .ok_or_else(|| bad_request("Unsupported Sui network"))?;
+
+    let match_record = state
+        .db
+        .configure_match_pool(match_uuid, Some(&network_config.network), &pool_object_id)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+
+    let match_with_odds = state
+        .db
+        .get_match_with_odds(&match_record.id.to_string())
+        .await
+        .map_err(|e| internal_error(e.to_string()))?
+        .ok_or_else(|| internal_error("Match not found after pool configuration"))?;
 
     Ok(Json(ApiResponse::ok(match_with_odds)))
 }

@@ -259,6 +259,8 @@ fn match_from_value(raw: Value) -> Option<CreateMatchRequest> {
         opponents,
         streams_list: raw.get("streams_list").cloned(),
         raw_data: Some(raw),
+        sui_network: None,
+        sui_pool_object_id: None,
     })
 }
 

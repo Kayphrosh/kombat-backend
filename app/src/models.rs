@@ -510,6 +510,7 @@ pub struct PoolStakeRecord {
 pub struct MatchWithOdds {
     #[serde(flatten)]
     pub match_info: MatchRecord,
+    pub pool_configured: bool,
     pub opponents: Vec<OpponentWithPool>,
     pub total_pool_usdc: i64,
     pub total_stakers: i64,
@@ -614,6 +615,10 @@ pub struct CreateMatchRequest {
 
     // Full raw data
     pub raw_data: Option<JsonValue>,
+
+    // On-chain pool metadata, populated by the indexer after create_pool.
+    pub sui_network: Option<String>,
+    pub sui_pool_object_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -624,6 +629,12 @@ pub struct CreateOpponentRequest {
     pub acronym: Option<String>,
     pub image_url: Option<String>,
     pub location: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConfigureMatchPoolRequest {
+    pub sui_network: Option<String>,
+    pub sui_pool_object_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -925,6 +936,7 @@ pub struct MatchListQuery {
     pub status: Option<String>,    // upcoming, live, completed, cancelled
     pub videogame: Option<String>, // Filter by videogame slug
     pub league_id: Option<i32>,
+    pub pool_configured: Option<bool>,
     pub search: Option<String>, // Search in name
     pub limit: Option<i64>,
     pub offset: Option<i64>,
@@ -1157,6 +1169,8 @@ pub struct PaymentIntentResponse {
     pub rules: Vec<PaymentIntentRule>,
     pub match_name: String,
     pub opponent_name: String,
+    pub pool_configured: bool,
+    pub pool_object_id: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1197,6 +1211,8 @@ pub struct PaymentIntentPtbResponse {
     pub can_build: bool,
     pub reason: Option<String>,
     pub coin_type: Option<String>,
+    pub pool_configured: bool,
+    pub pool_object_id: Option<String>,
     pub amount_usdc: i64,
     pub reserve_balance_usdc: i64,
     pub expected_receipt_type: String,

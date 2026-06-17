@@ -261,15 +261,18 @@ POST /api/transak/quote
 List and filter tournaments:
 
 ```http
-GET /api/tournaments?status=upcoming&videogame=codm&search=final&limit=20&offset=0
+GET /api/tournaments?status=upcoming&videogame=codm&pool_configured=true&search=final&limit=20&offset=0
 GET /api/tournaments/:id
 ```
 
 The `MatchWithOdds` response contains:
 
 - `match_info`: tournament/match metadata, status, timing, Sui pool object ID.
+- `pool_configured`: `true` only when `match_info.sui_pool_object_id` is present.
 - `opponents`: exactly two sides for stakeable binary markets.
 - pool/odds data used for display and payout estimates.
+
+Only show on-chain stake entry points for matches where `pool_configured === true`.
 
 PandaScore source metadata:
 
@@ -328,6 +331,8 @@ type PaymentIntentResponse = {
   }>;
   match_name: string;
   opponent_name: string;
+  pool_configured: boolean;
+  pool_object_id?: string;
 };
 ```
 
@@ -1037,6 +1042,20 @@ If `can_build === false`, do not show a sign button. Show the `reason` and fallb
 - `usdc_coin_type_not_configured`: token config missing.
 - `pool_object_not_configured`: market has no Sui pool object yet.
 - `listing_not_active` or `listing_expired`: refresh listing/feed.
+
+After the platform creates a `tournament_staking::create_pool` object on-chain, the backend/indexer must register the shared pool object before users can stake:
+
+```http
+POST /api/admin/tournaments/:id/pool
+X-Admin-Token: <AUTH_ADMIN_TOKEN>
+
+{
+  "sui_network": "testnet",
+  "sui_pool_object_id": "0x..."
+}
+```
+
+PandaScore sync/backfill payloads may also include `sui_network` and `sui_pool_object_id`; ordinary syncs preserve any existing pool object when those fields are omitted.
 
 ## 20. Security Checklist For FE
 

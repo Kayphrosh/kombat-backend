@@ -105,6 +105,11 @@ pub async fn create_payment_intent(
 
     let match_with_odds = load_match_for_payment(&state, &req.match_id).await?;
     validate_payment_target(&match_with_odds, opponent_uuid)?;
+    if !match_with_odds.pool_configured {
+        return Err(bad_request(
+            "Tournament pool is not configured for on-chain staking",
+        ));
+    }
 
     let current_balance_usdc = wallet_usdc_balance(&state, &network, &requested_wallet).await?;
     let funding_shortfall_usdc =
@@ -279,6 +284,8 @@ pub async fn get_payment_intent_ptb(
         can_build,
         reason,
         coin_type,
+        pool_configured: pool_object_id.is_some(),
+        pool_object_id,
         amount_usdc: response.intent.amount_usdc,
         reserve_balance_usdc: response.intent.reserve_balance_usdc,
         expected_receipt_type: "StakeReceipt".to_string(),
@@ -523,6 +530,8 @@ fn build_intent_response(
         rules,
         match_name: match_with_odds.match_info.name.clone(),
         opponent_name: opponent.opponent.name.clone(),
+        pool_configured: match_with_odds.pool_configured,
+        pool_object_id: match_with_odds.match_info.sui_pool_object_id.clone(),
     })
 }
 
