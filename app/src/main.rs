@@ -54,8 +54,9 @@ use handlers::tournament::{
 use handlers::transak::{create_transak_widget_url, get_transak_config, get_transak_quote};
 use handlers::upload::upload_file;
 use handlers::user::{
-    delete_user, get_home_summary, get_notification_settings, get_user_profile, get_user_stats,
-    register_push_token, search_users, update_notification_settings, update_user_profile,
+    check_email, delete_user, get_home_summary, get_notification_settings, get_user_profile,
+    get_user_stats, register_push_token, search_users, update_notification_settings,
+    update_user_profile,
 };
 use handlers::wager::{
     accept_wager, accept_wager_ptb, cancel_wager, cancel_wager_ptb, create_wager, create_wager_ptb,
@@ -208,6 +209,7 @@ async fn main() -> anyhow::Result<()> {
         // Health check
         .route("/health", get(health_handler))
         // ── User profile routes ──────────────────────────────────────────────
+        .route("/check-email", get(check_email))
         .route("/users/search", get(search_users))
         .route(
             "/users/:wallet",
@@ -222,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
             get(get_notification_settings).put(update_notification_settings),
         )
         // ── /api/users/* aliases ──────────────────────────────────────────────
+        .route("/api/check-email", get(check_email))
         .route("/api/users/search", get(search_users))
         .route("/api/home/:wallet", get(get_home_summary))
         .route(

@@ -76,7 +76,36 @@ impl DbService {
             .max_connections(20)
             .connect(database_url)
             .await?;
+        Self::ensure_wager_resolution_columns(&pool).await?;
+        Self::ensure_user_email_column(&pool).await?;
         Ok(Self { pool })
+    }
+
+    async fn ensure_wager_resolution_columns(pool: &PgPool) -> Result<()> {
+        sqlx::query(
+            r#"
+            ALTER TABLE wagers
+                ADD COLUMN IF NOT EXISTS resolution_error TEXT,
+                ADD COLUMN IF NOT EXISTS resolution_attempted_at TIMESTAMPTZ
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
+    }
+
+    async fn ensure_user_email_column(pool: &PgPool) -> Result<()> {
+        sqlx::query(
+            r#"
+            ALTER TABLE users
+                ADD COLUMN IF NOT EXISTS email TEXT
+            "#,
+        )
+        .execute(pool)
+        .await?;
+
+        Ok(())
     }
 
     // ── Notifications ────────────────────────────────────────────────────
@@ -630,6 +659,15 @@ impl DbService {
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
+    }
+
+    pub async fn email_exists(&self, email: &str) -> Result<bool> {
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users WHERE lower(email) = lower($1))")
+                .bind(email)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(exists)
     }
 
     pub async fn upsert_user(
@@ -2586,6 +2624,36 @@ impl DbService {
         .bind(status)
         .fetch_all(&self.pool)
         .await?;
+        Ok(rows)
+    }
+
+    pub async fn list_stakes_by_match(
+        &self,
+        match_id: &str,
+        query: &crate::models::StakeListQuery,
+    ) -> Result<Vec<crate::models::PoolStakeRecord>> {
+        let match_uuid = uuid::Uuid::parse_str(match_id)
+            .map_err(|e| anyhow::anyhow!("Invalid match ID: {}", e))?;
+        let limit = query.limit.unwrap_or(50).min(200);
+        let offset = query.offset.unwrap_or(0);
+
+        let rows = sqlx::query_as::<_, crate::models::PoolStakeRecord>(
+            r#"
+            SELECT *
+            FROM pool_stakes
+            WHERE match_id = $1
+              AND ($2::text IS NULL OR status = $2)
+            ORDER BY created_at DESC
+            LIMIT $3 OFFSET $4
+            "#,
+        )
+        .bind(match_uuid)
+        .bind(query.status.as_deref())
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?;
+
         Ok(rows)
     }
 
