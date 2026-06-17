@@ -585,22 +585,26 @@ pub async fn calculate_payout(
 }
 
 // ─── GET /api/tournaments/:id/stakes ──────────────────────────────────────────
-/// List stakes for a tournament (returns match with odds showing pool info)
+/// List individual stakes for a tournament.
 pub async fn list_tournament_stakes(
     State(state): State<Arc<AppState>>,
     Path(match_id): Path<String>,
-    Query(_query): Query<StakeListQuery>,
-) -> AppResult<MatchWithOdds> {
-    // Return the match with full pool statistics
-    // Individual stake details are available via /api/users/:wallet/stakes
-    let match_with_odds = state
+    Query(query): Query<StakeListQuery>,
+) -> AppResult<Vec<PoolStakeRecord>> {
+    state
         .db
         .get_match_with_odds(&match_id)
         .await
         .map_err(|e| internal_error(e.to_string()))?
         .ok_or_else(|| not_found("Tournament not found"))?;
 
-    Ok(Json(ApiResponse::ok(match_with_odds)))
+    let stakes = state
+        .db
+        .list_stakes_by_match(&match_id, &query)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    Ok(Json(ApiResponse::ok(stakes)))
 }
 
 // ─── POST /api/tournaments/:id/resolve ────────────────────────────────────────

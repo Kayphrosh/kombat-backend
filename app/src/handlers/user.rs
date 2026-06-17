@@ -3,6 +3,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::{
@@ -66,6 +67,17 @@ fn is_history_status(status: &str) -> bool {
     matches!(status, "resolved" | "cancelled" | "declined" | "expired")
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CheckEmailQuery {
+    pub email: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CheckEmailResponse {
+    pub email: String,
+    pub available: bool,
+}
+
 // ─── GET /users/:wallet ───────────────────────────────────────────────────────
 
 pub async fn get_user_profile(
@@ -113,6 +125,29 @@ pub async fn search_users(
         .map_err(|e| internal_error(e.to_string()))?;
 
     Ok(Json(ApiResponse::ok(users)))
+}
+
+// ─── GET /check-email?email=... ───────────────────────────────────────────────
+
+pub async fn check_email(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<CheckEmailQuery>,
+) -> AppResult<CheckEmailResponse> {
+    let email = query.email.trim().to_ascii_lowercase();
+    if email.is_empty() || !email.contains('@') {
+        return Err(bad_request("Invalid email"));
+    }
+
+    let exists = state
+        .db
+        .email_exists(&email)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    Ok(Json(ApiResponse::ok(CheckEmailResponse {
+        email,
+        available: !exists,
+    })))
 }
 
 // ─── POST /users/:wallet ──────────────────────────────────────────────────────

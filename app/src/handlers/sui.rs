@@ -13,6 +13,7 @@ use crate::{
     },
     state::AppState,
 };
+use serde_json::json;
 
 type AppResult<T> = Result<Json<ApiResponse<T>>, (StatusCode, Json<ApiResponse<()>>)>;
 
@@ -25,6 +26,19 @@ fn internal_error(msg: impl Into<String>) -> (StatusCode, Json<ApiResponse<()>>)
         StatusCode::INTERNAL_SERVER_ERROR,
         Json(ApiResponse::err(msg)),
     )
+}
+
+fn is_zero_sui_address(wallet: &str) -> bool {
+    wallet == "0x0000000000000000000000000000000000000000000000000000000000000000"
+}
+
+fn zero_usdc_balance(coin_type: Option<&str>) -> crate::services::sui::SuiCoinBalance {
+    crate::services::sui::SuiCoinBalance {
+        coin_type: coin_type.unwrap_or_default().to_string(),
+        coin_object_count: 0,
+        total_balance: "0".to_string(),
+        locked_balance: json!({}),
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -108,8 +122,11 @@ pub async fn get_wallet_balances(
     State(state): State<Arc<AppState>>,
     Path(wallet): Path<String>,
 ) -> AppResult<Vec<crate::services::sui::SuiBalance>> {
-    if crate::services::sui::SuiService::normalize_address(&wallet).is_none() {
-        return Err(bad_request("Invalid Sui wallet address"));
+    let wallet = crate::services::sui::SuiService::normalize_address(&wallet)
+        .ok_or_else(|| bad_request("Invalid Sui wallet address"))?;
+
+    if is_zero_sui_address(&wallet) {
+        return Ok(Json(ApiResponse::ok(vec![])));
     }
 
     let balances = state
@@ -125,8 +142,12 @@ pub async fn get_wallet_usdc_balance(
     State(state): State<Arc<AppState>>,
     Path(wallet): Path<String>,
 ) -> AppResult<crate::services::sui::SuiCoinBalance> {
-    if crate::services::sui::SuiService::normalize_address(&wallet).is_none() {
-        return Err(bad_request("Invalid Sui wallet address"));
+    let wallet = crate::services::sui::SuiService::normalize_address(&wallet)
+        .ok_or_else(|| bad_request("Invalid Sui wallet address"))?;
+
+    if is_zero_sui_address(&wallet) {
+        let coin_type = state.sui.active_config().usdc_coin_type.as_deref();
+        return Ok(Json(ApiResponse::ok(zero_usdc_balance(coin_type))));
     }
 
     let balance = state
@@ -203,13 +224,16 @@ async fn get_network_wallet_balances(
         return Err(bad_request("Unsupported Sui network"));
     }
 
-    if crate::services::sui::SuiService::normalize_address(wallet).is_none() {
-        return Err(bad_request("Invalid Sui wallet address"));
+    let wallet = crate::services::sui::SuiService::normalize_address(wallet)
+        .ok_or_else(|| bad_request("Invalid Sui wallet address"))?;
+
+    if is_zero_sui_address(&wallet) {
+        return Ok(Json(ApiResponse::ok(vec![])));
     }
 
     let balances = state
         .sui
-        .all_balances_for(network, wallet)
+        .all_balances_for(network, &wallet)
         .await
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -225,13 +249,21 @@ async fn get_network_wallet_usdc_balance(
         return Err(bad_request("Unsupported Sui network"));
     }
 
-    if crate::services::sui::SuiService::normalize_address(wallet).is_none() {
-        return Err(bad_request("Invalid Sui wallet address"));
+    let wallet = crate::services::sui::SuiService::normalize_address(wallet)
+        .ok_or_else(|| bad_request("Invalid Sui wallet address"))?;
+
+    if is_zero_sui_address(&wallet) {
+        let coin_type = state
+            .sui
+            .config()
+            .network(network)
+            .and_then(|config| config.usdc_coin_type.as_deref());
+        return Ok(Json(ApiResponse::ok(zero_usdc_balance(coin_type))));
     }
 
     let balance = state
         .sui
-        .usdc_balance_for(network, wallet)
+        .usdc_balance_for(network, &wallet)
         .await
         .map_err(|e| internal_error(e.to_string()))?;
 
@@ -252,6 +284,30 @@ async fn get_network_wallet_dashboard(
 
     let wallet = crate::services::sui::SuiService::normalize_address(wallet)
         .ok_or_else(|| bad_request("Invalid Sui wallet address"))?;
+
+    if is_zero_sui_address(&wallet) {
+        return Ok(Json(ApiResponse::ok(WalletDashboardResponse {
+            network: config.network.clone(),
+            wallet,
+            usdc_coin_type: config.usdc_coin_type.clone(),
+            available_balance_usdc: 0,
+            locked_in_kombats_usdc: 0,
+            total_balance_usdc: 0,
+            transaction_history: vec![],
+            actions: WalletActionConfig {
+                fund_wallet: WalletAction {
+                    enabled: state.ramp.config().dynamic_onramp_enabled,
+                    provider: state.ramp.config().primary_provider.clone(),
+                    requires_frontend_wallet: true,
+                },
+                withdraw: WalletAction {
+                    enabled: false,
+                    provider: "not_supported".to_string(),
+                    requires_frontend_wallet: true,
+                },
+            },
+        })));
+    }
 
     let balance = state
         .sui
