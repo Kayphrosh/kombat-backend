@@ -78,6 +78,16 @@ pub struct AcceptWagerRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct CancelWagerRequest {
+    pub initiator: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeclineWagerRequest {
+    pub challenger: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct FundWagerRequest {
     pub initiator: String,
 }
@@ -150,6 +160,8 @@ pub struct WagerRecord {
     pub initiator_option: Option<String>,
     pub creator_declared_winner: Option<String>,
     pub challenger_declared_winner: Option<String>,
+    pub resolution_error: Option<String>,
+    pub resolution_attempted_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -164,6 +176,12 @@ pub struct WagerDetailResponse {
     pub opponent_wallet: Option<String>,
     pub opponent_name: Option<String>,
     pub opponent_avatar: Option<String>,
+    pub expiry_ms: i64,
+    pub expiry_unit: String,
+    pub address_format: String,
+    pub is_legacy: bool,
+    pub resolution_error: Option<String>,
+    pub resolution_attempted_at: Option<DateTime<Utc>>,
 }
 
 // ─── User Profile ─────────────────────────────────────────────────────────────

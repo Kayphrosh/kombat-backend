@@ -1,60 +1,104 @@
-# Kombat Backend
+# Kombat Frontend Integration Guide
 
-Rust API for Kombat, moving to a **Sui-first** architecture with Dynamic embedded wallets.
+This backend is the Kombat API for a Sui-first app using Dynamic embedded wallets. The frontend should treat Dynamic as the only authentication source, use the user's Dynamic-created Sui embedded wallet as the Kombat wallet, and use backend-provided PTB descriptors for Sui transactions.
 
-## Current Scope
+Production API:
 
-- Dynamic-only authentication through `POST /api/auth/verify`
-- Sui wallet addresses extracted from Dynamic credentials
-- User profiles, notifications, uploads, and tournament metadata APIs
-- Existing tournament pool records kept in Postgres while the Sui Move staking contract is introduced
-
-Removed from the active backend:
-
-- Solana RPC service and indexer
-- Native wallet nonce authentication
-- Server-built Solana transaction routes
-- Anchor/Solana program workspace
-
-## Required Environment
-
-```env
-DATABASE_URL=postgres://user:password@localhost:5432/wager_db
-AUTH_JWT_SECRET=<long-random-secret>
-DYNAMIC_ENVIRONMENT_ID=<dynamic-environment-id>
-SUI_NETWORK=testnet
-SUI_TESTNET_RPC_URL=https://fullnode.testnet.sui.io:443
-SUI_MAINNET_RPC_URL=https://fullnode.mainnet.sui.io:443
-SUI_TESTNET_PACKAGE_ID=<testnet-move-package-id-optional-for-now>
-SUI_MAINNET_PACKAGE_ID=<mainnet-move-package-id-optional-for-now>
-SUI_TESTNET_USDC_COIN_TYPE=0xa1ec7fc00a6f40db9693ad1415d0c193ad3906494428cf252621037bd7117e29::usdc::USDC
-SUI_MAINNET_USDC_COIN_TYPE=0xdba34672e30cb065b1f93e3ab55318768fd6fef66c15942c9f7cb846e2f900e7::usdc::USDC
-SUI_STAKING_MODULE=tournament_staking
-RAMP_PRIMARY_PROVIDER=dynamic_native
-DYNAMIC_ONRAMP_ENABLED=true
-MANUAL_CRYPTO_DEPOSIT_ENABLED=true
-RAMP_DEFAULT_NETWORK=sui
-RAMP_DEFAULT_CRYPTO_CURRENCY=USDC
-RAMP_DEFAULT_FIAT_CURRENCY=USD
-RAMP_PARTNER_FEE_BPS=0
-PORT=3000
-RUST_LOG=wager_api=debug,tower_http=debug
+```text
+https://kombat-backend-production.up.railway.app
 ```
 
-## Run Locally
+Local API defaults to:
 
-```bash
-cd app
-cargo run
+```text
+http://localhost:3000
 ```
 
-Health check:
+## Integration Rules
 
-```bash
-curl http://localhost:3000/health
+- Only Dynamic auth is supported. Do not use native wallet nonce signing or Solana wallet-adapter auth.
+- Wallet addresses are Sui addresses from Dynamic embedded wallets.
+- Protected user routes require `Authorization: Bearer <accessToken>`.
+- Do not put JWTs in query strings, including notification streams.
+- Amounts are always micro-USDC. `1 USDC = 1_000_000`.
+- Most API responses are wrapped as `{ "success": true, "data": ..., "error": null }`.
+- `POST /api/auth/verify` is the exception. It returns `{ "user": ..., "accessToken": "..." }` directly.
+- Treat `401` as expired or invalid Kombat JWT. Clear the app token and re-run Dynamic verify.
+- The primary tournament staking path is payment intents, not direct `POST /api/tournaments/:id/stake`.
+- Frontend reads tournament data from Kombat endpoints. Do not call PandaScore directly from the app.
+- Transak is optional fallback only. Dynamic native funding is the primary on-ramp path.
+
+## Dynamic Setup
+
+Dynamic must be configured in the dashboard before new accounts can receive Sui wallets.
+
+1. Enable Sui under Dynamic embedded wallet chains, not only under general networks.
+2. Open the Embedded Wallets settings gear and enable one Sui network for wallet creation.
+3. Enable only one Sui network at a time in Dynamic for this app environment.
+4. In the client, create the wallet with the Dynamic SDK chain value `Sui`.
+5. Do not retry with `SUI`; the backend and Dynamic SDK expect Sui, and `SUI` is invalid for wallet creation.
+
+If Dynamic logs `No enabled embedded wallet chains`, the problem is dashboard configuration under Embedded Wallets. Enabling Sui in the regular Networks page is not enough.
+
+## API Client Shape
+
+Use one helper for wrapped Kombat responses:
+
+```ts
+type ApiEnvelope<T> = {
+  success: boolean;
+  data: T | null;
+  error: string | null;
+};
+
+async function apiFetch<T>(path: string, init: RequestInit = {}, token?: string): Promise<T> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init.headers ?? {}),
+    },
+  });
+
+  const body = await res.json().catch(() => null);
+  if (!res.ok) {
+    throw new Error(body?.error ?? body?.message ?? `HTTP ${res.status}`);
+  }
+
+  if (body && typeof body === "object" && "success" in body) {
+    if (!body.success) throw new Error(body.error ?? "Request failed");
+    return body.data as T;
+  }
+
+  return body as T;
+}
+```
+
+Keep auth verify separate because it is not envelope-wrapped:
+
+```ts
+type DynamicAuthResponse = {
+  user: UserRecord;
+  accessToken: string;
+};
+
+async function verifyDynamic(dynamicToken: string): Promise<DynamicAuthResponse> {
+  const res = await fetch(`${API_BASE}/api/auth/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ dynamic_token: dynamicToken }),
+  });
+
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body?.error ?? body?.message ?? `Auth verify failed: ${res.status}`);
+  return body;
+}
 ```
 
 ## Authentication
+
+### Verify Dynamic Token
 
 ```http
 POST /api/auth/verify
@@ -65,145 +109,1169 @@ Content-Type: application/json
 }
 ```
 
-The response returns `accessToken`, which should be sent as:
+`dynamicToken` is also accepted as an alias, but new code should send `dynamic_token`.
 
-```http
-Authorization: Bearer <accessToken>
+Response:
+
+```json
+{
+  "user": {
+    "id": "uuid",
+    "wallet_address": "0x...",
+    "email": null,
+    "display_name": null,
+    "avatar_url": null,
+    "wins": 0,
+    "losses": 0,
+    "created_at": "2026-06-16T00:00:00Z",
+    "updated_at": "2026-06-16T00:00:00Z"
+  },
+  "accessToken": "<kombat-app-jwt>"
+}
 ```
 
-## Sui Direction
+The backend extracts the wallet from the Dynamic token, upserts the user profile, and returns a short-lived Kombat app JWT. If the Dynamic token has no Sui wallet address, the endpoint returns `400`.
 
-The on-chain layer is a Sui Move tournament staking package. The backend syncs match metadata, verifies Dynamic users, indexes Sui events, and exposes app-friendly views. Funds should move through Sui PTBs and Move objects rather than backend custody.
+### Auth Flow
 
-## Kombat Smart Pay
+1. User signs in with Dynamic.
+2. Ensure a Sui embedded wallet exists.
+3. Get the Dynamic JWT from the SDK.
+4. Call `POST /api/auth/verify`.
+5. Store `accessToken` and `user.wallet_address`.
+6. Send `Authorization: Bearer <accessToken>` on protected Kombat routes.
+7. On `401`, clear the Kombat token and call verify again with a fresh Dynamic token.
 
-Kombat Smart Pay turns a user action into a programmable payment intent:
+## Sui Config And Wallet Data
 
-- Create an intent for `STAKE_TOURNAMENT`.
-- Check Sui USDC balance and calculate the exact funding shortfall.
-- Preserve an optional wallet reserve with `reserve_balance_usdc`.
-- On-ramp only the shortfall through Dynamic native funding.
-- Return a frontend-readable PTB plan for `tournament_staking::stake<USDC>`, which locks funds and mints a `StakeReceipt`.
+### App Config
 
-Endpoints:
+```http
+GET /api/sui/config
+GET /api/sui/networks/:network/config
+```
 
-- `POST /api/payments/intents`
-- `GET /api/payments/intents/:id`
-- `POST /api/payments/intents/:id/onramp-session`
-- `GET /api/payments/intents/:id/ptb`
+Returns:
 
-## Receipt Market
+```ts
+type SuiAppConfigResponse = {
+  active_network: string;
+  networks: SuiConfigResponse[];
+};
 
-Kombat supports trade in/out before settlement through a receipt market. A seller lists their `StakeReceipt`; a buyer pays the ask in USDC and receives the receipt atomically on Sui. The pool itself is not unwound early.
+type SuiConfigResponse = {
+  network: string;
+  rpc_url: string;
+  package_id: string | null;
+  wager_package_id: string | null;
+  usdc_coin_type: string | null;
+  staking_module: string;
+  wager_module: string;
+};
+```
 
-Endpoints:
+### Health
 
-- `POST /api/receipt-market/listings`
-- `GET /api/receipt-market/listings`
-- `GET /api/receipt-market/listings/:id`
-- `POST /api/receipt-market/listings/:id/activate`
-- `GET /api/receipt-market/listings/:id/list-ptb`
-- `GET /api/receipt-market/listings/:id/buy-ptb`
-- `POST /api/receipt-market/listings/:id/mark-sold`
+```http
+GET /api/sui/health
+GET /api/sui/networks/:network/health
+```
 
-## Notifications
+Use this for environment diagnostics. It includes RPC reachability and chain metadata.
 
-Kombat stores wallet-scoped notifications and broadcasts the same records over SSE/WebSocket. Every transactional notification includes `payload.title`, `payload.body`, `payload.action`, and `payload.entities` so the frontend can render a CTA without hard-coding the next endpoint.
+### Balances
 
-Endpoints:
+```http
+GET /api/sui/wallets/:wallet/balances
+GET /api/sui/wallets/:wallet/usdc-balance
+GET /api/sui/networks/:network/wallets/:wallet/balances
+GET /api/sui/networks/:network/wallets/:wallet/usdc-balance
+```
 
-- `GET /api/notifications/:wallet`
-- `POST /api/notifications/:id/read`
-- `GET /notifications/stream/:wallet`
-- `GET /ws/notifications/:wallet`
+Wallet addresses are validated and normalized as Sui addresses.
 
-All notification endpoints require `Authorization: Bearer <accessToken>`.
+### Wallet Screen
 
-## Sui Endpoints
+Use this as the single wallet screen fetch:
 
-- `GET /api/sui/config` returns the active network plus testnet/mainnet RPC, package, USDC, and staking module config.
-- `GET /api/sui/health` checks the active Sui RPC and returns the chain identifier plus reference gas price.
-- `GET /api/sui/wallets/:wallet/balances` returns all Sui coin balances for a wallet on the active network.
-- `GET /api/sui/wallets/:wallet/usdc-balance` returns the wallet's USDC balance on the active network.
-- `GET /api/sui/wallets/:wallet/dashboard` returns the Wallet screen view model: available USDC, locked Kombat stake amount, transaction history, and action metadata.
-- `GET /api/sui/networks/:network/config` returns config for `testnet` or `mainnet`.
-- `GET /api/sui/networks/:network/health` checks `testnet` or `mainnet`.
-- `GET /api/sui/networks/:network/wallets/:wallet/balances` returns balances on `testnet` or `mainnet`.
-- `GET /api/sui/networks/:network/wallets/:wallet/usdc-balance` returns the wallet's USDC balance on `testnet` or `mainnet`.
-- `GET /api/sui/networks/:network/wallets/:wallet/dashboard` returns the Wallet screen view model for `testnet` or `mainnet`.
+```http
+GET /api/sui/networks/testnet/wallets/:wallet/dashboard?limit=20&offset=0
+```
+
+Map fields directly:
+
+- Segmented control: `network`
+- Available Balance: `available_balance_usdc`
+- Locked in Kombats: `locked_in_kombats_usdc`
+- Transaction History: `transaction_history`
+- Fund Wallet button: `actions.fund_wallet`
+- Withdraw button: `actions.withdraw`
+
+`actions.withdraw.enabled` is currently false because Kombat supports on-ramp only.
+
+## Funding
+
+### Discover Providers
+
+```http
+GET /api/ramps/providers?country=NG
+```
+
+Response data includes:
+
+```ts
+type RampProvidersResponse = {
+  primary_provider: "dynamic_native";
+  default_network: "sui";
+  default_crypto_currency: "USDC";
+  default_fiat_currency: "USD";
+  partner_fee_bps: number;
+  country?: string;
+  providers: unknown[];
+};
+```
+
+### Create Dynamic Funding Session
+
+```http
+POST /api/ramps/session
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+
+{
+  "wallet_address": "0x...",
+  "product": "BUY",
+  "fiat_currency": "USD",
+  "fiat_amount": 50,
+  "crypto_currency_code": "USDC",
+  "network": "sui"
+}
+```
+
+Response data:
+
+```ts
+type RampSessionResponse = {
+  provider: "dynamic_native";
+  product: "BUY";
+  wallet_address: string;
+  launch_method: "dynamic_sdk";
+  client_action: "open_dynamic_onramp";
+  network: string;
+  crypto_currency_code: string;
+  fiat_currency: string;
+  fiat_amount?: string;
+  crypto_amount?: string;
+  note: string;
+};
+```
+
+When `client_action` is `open_dynamic_onramp`, launch Dynamic's native funding UI with the wallet, network, asset, and amount from the response. `SELL` is rejected.
 
 ## Tournament Data
 
-Tournament data is ingested server-side from PandaScore and stored in Kombat's database. The frontend should use Kombat tournament endpoints only.
+Frontend reads tournaments from Kombat:
 
-PandaScore config:
+```http
+GET /api/tournaments?status=upcoming&videogame=codm&limit=20&offset=0
+GET /api/tournaments/:id
+```
 
-- `PANDASCORE_ENABLED=true`
-- `PANDASCORE_API_KEY=<server-side key>`
-- `PANDASCORE_BASE_URL=https://api.pandascore.co`
-- `PANDASCORE_DEFAULT_STATUSES=upcoming,running,past`
-- `PANDASCORE_VIDEOGAME_SLUGS=csgo,dota2,lol` optional
-- `PANDASCORE_PER_PAGE=50`
+Query params:
 
-Endpoints:
+- `status`: `upcoming`, `live`, `completed`, `cancelled`
+- `videogame`: videogame slug
+- `league_id`: PandaScore league id
+- `search`: match name search
+- `limit`, `offset`
 
-- `GET /api/tournaments/source/pandascore`
-- `POST /api/tournaments/source/pandascore/sync` with `X-Admin-Token`
+Response data is `MatchWithOdds[]` for list and `MatchWithOdds` for detail:
 
-For events outside PandaScore coverage, organizers can create tournaments and stakeable matches directly:
+```ts
+type MatchWithOdds = MatchRecord & {
+  opponents: OpponentWithPool[];
+  total_pool_usdc: number;
+  total_stakers: number;
+};
 
-- `POST /api/organizers/apply`
-- `POST /api/organizers/kyc-session`
-- `GET /api/organizers/:wallet` with organizer JWT or `X-Admin-Token`
-- `POST /api/organizers/:wallet/review` with `X-Admin-Token`
-- `GET /api/admin/organizers` with `X-Admin-Token`
-- `GET /api/admin/organizers/:wallet` with `X-Admin-Token`
-- `GET /api/organizer/tournaments`
-- `POST /api/organizer/tournaments`
-- `POST /api/organizer/tournaments/:id/matches`
+type OpponentWithPool = MatchOpponentRecord & {
+  pool_usdc: number;
+  pool_percentage: number;
+  odds: number;
+  staker_count: number;
+};
+```
 
-Organizer-created matches require the organizer wallet to have `status = approved` and `kyc_status = verified`. They appear in the normal `GET /api/tournaments` response with `source = organizer`. Rules, brackets, and result evidence can reference Walrus blobs through `rules_blob_id`, `bracket_blob_id`, and `evidence_blob_id`.
+The backend owns PandaScore access and normalizes provider data. The mobile app should not call PandaScore.
 
-Outcome proposals support organizer or agent-driven result verification:
+Admin-only PandaScore sync:
 
-- `GET /api/tournaments/:id/outcome-proposals`
-- `POST /api/tournaments/:id/outcome-proposals`
-- `GET /api/admin/outcome-proposals` with `X-Admin-Token`
-- `GET /api/admin/outcome-proposals/:id` with `X-Admin-Token`
-- `POST /api/outcome-proposals/:id/review` with `X-Admin-Token`
+```http
+GET /api/tournaments/source/pandascore
+POST /api/tournaments/source/pandascore/sync
+X-Admin-Token: <admin-token>
+```
 
-## Walrus And Agents
+Optional sync body:
 
-Walrus is used for durable public evidence, rules, brackets, and agent reports. Do not upload private KYC documents or sensitive user data to these endpoints unless a privacy layer such as Seal is added.
+```json
+{
+  "statuses": ["upcoming", "running", "past"],
+  "videogame_slugs": ["csgo", "dota2", "lol"],
+  "max_pages": 1,
+  "per_page": 50
+}
+```
+
+`POST /api/tournaments` accepts PandaScore-shaped data for admin backfills and local development only. It is protected by the Kombat app JWT and should not be normal app flow.
+
+## Smart Pay Staking
+
+Use payment intents for the primary stake flow. The backend checks Sui USDC balance, calculates funding shortfall, and returns a PTB descriptor for the frontend to sign with Dynamic.
+
+### Stake Flow
+
+1. User signs in with Dynamic and verifies with Kombat.
+2. User selects match, opponent, and amount.
+3. Client creates a payment intent.
+4. Backend returns current balance, required balance, and shortfall.
+5. If `funding.onramp_required` is true, create/open the intent on-ramp session.
+6. Poll or refetch the intent until `onramp_required` is false.
+7. Fetch the PTB descriptor.
+8. Build and sign the Sui transaction with Dynamic.
+9. The Move contract locks USDC and mints a `StakeReceipt`.
+
+### Create Intent
+
+```http
+POST /api/payments/intents
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+
+{
+  "wallet_address": "0x...",
+  "match_id": "match-uuid",
+  "opponent_id": "opponent-uuid",
+  "amount_usdc": 25000000,
+  "reserve_balance_usdc": 5000000,
+  "network": "testnet"
+}
+```
+
+Rules:
+
+- `wallet_address` must match the wallet in the JWT.
+- Minimum amount is `1_000_000` micro-USDC.
+- `reserve_balance_usdc` is optional and defaults to `0`.
+- `settlement_rule` is optional and currently must be `return_to_wallet`.
+
+Response data:
+
+```ts
+type PaymentIntentResponse = {
+  intent: PaymentIntentRecord;
+  funding: {
+    current_balance_usdc: number;
+    required_balance_usdc: number;
+    funding_shortfall_usdc: number;
+    onramp_required: boolean;
+  };
+  rules: Array<{
+    rule_type: string;
+    amount_usdc: number;
+    description: string;
+  }>;
+  match_name: string;
+  opponent_name: string;
+};
+```
+
+### Refresh Intent
+
+```http
+GET /api/payments/intents/:id
+Authorization: Bearer <accessToken>
+```
+
+Use this after funding to re-check the wallet balance and intent status.
+
+### Intent On-Ramp
+
+```http
+POST /api/payments/intents/:id/onramp-session
+Authorization: Bearer <accessToken>
+```
+
+Call this only when the intent says `onramp_required: true`. If funding is required, response data includes `ramp_session` with `client_action: "open_dynamic_onramp"`.
+
+### Intent PTB
+
+```http
+GET /api/payments/intents/:id/ptb
+Authorization: Bearer <accessToken>
+```
+
+Response data:
+
+```ts
+type PaymentIntentPtbResponse = {
+  intent_id: string;
+  network: string;
+  can_build: boolean;
+  reason: string | null;
+  coin_type: string | null;
+  amount_usdc: number;
+  reserve_balance_usdc: number;
+  expected_receipt_type: "StakeReceipt";
+  steps: PaymentPtbStep[];
+  move_call: PaymentMoveCall | null;
+};
+```
+
+If `can_build` is false, show a blocking state using `reason`. Common reasons are:
+
+- `intent_requires_funding`
+- `staking_package_not_configured`
+- `usdc_coin_type_not_configured`
+- `pool_object_not_configured`
+
+The Move call target is:
+
+```text
+<package_id>::<staking_module>::stake
+```
+
+The frontend must provide the user's USDC coin input, shared pool object, outcome id, amount, and Sui clock exactly as described by `move_call.arguments`.
+
+## PTB Descriptor Handling
+
+Kombat returns descriptors, not serialized transactions. The frontend builds the transaction with the Sui SDK and signs it using Dynamic.
+
+Descriptor fields:
+
+```ts
+type PaymentMoveCall = {
+  target: string;
+  package_id: string;
+  module: string;
+  function: string;
+  type_arguments: string[];
+  arguments: Array<{
+    name: string;
+    kind: string;
+    value?: unknown;
+    source: string;
+  }>;
+};
+```
+
+Implementation pattern:
+
+1. Read `move_call.target` and `type_arguments`.
+2. Resolve object arguments from `value`.
+3. For `source: "frontend_wallet"`, select/split the required USDC coin from the user's wallet.
+4. Use shared objects as shared object inputs.
+5. Use `0x6` as the Sui clock when specified.
+6. Sign and execute through the Dynamic Sui wallet.
+7. Save returned tx hashes/object ids through the matching backend endpoint when the flow requires activation or indexing.
+
+## Receipt Market
+
+Users can sell `StakeReceipt` objects before settlement. The pool is not unwound; ownership of the receipt changes.
+
+### Seller Flow
+
+1. Create listing draft.
+2. Fetch list PTB.
+3. Sign `list_receipt<USDC>` with Dynamic.
+4. Activate listing with the created shared listing object id.
+
+Create listing:
+
+```http
+POST /api/receipt-market/listings
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+
+{
+  "wallet_address": "0x...",
+  "receipt_id": "0x...",
+  "match_id": "match-uuid",
+  "opponent_id": "opponent-uuid",
+  "ask_amount_usdc": 20000000,
+  "network": "testnet"
+}
+```
+
+List PTB:
+
+```http
+GET /api/receipt-market/listings/:id/list-ptb
+Authorization: Bearer <accessToken>
+```
+
+Activate after successful Sui transaction:
+
+```http
+POST /api/receipt-market/listings/:id/activate
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+
+{
+  "wallet_address": "0x...",
+  "listing_object_id": "0x...",
+  "listing_tx_hash": "..."
+}
+```
+
+### Buyer Flow
+
+Discover listings:
+
+```http
+GET /api/receipt-market/listings?match_id=match-uuid&status=active&limit=20&offset=0
+GET /api/receipt-market/listings/:id
+```
+
+Buy PTB:
+
+```http
+GET /api/receipt-market/listings/:id/buy-ptb
+Authorization: Bearer <accessToken>
+```
+
+Mark sold after successful Sui transaction:
+
+```http
+POST /api/receipt-market/listings/:id/mark-sold
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+
+{
+  "buyer_wallet": "0x...",
+  "sale_tx_hash": "..."
+}
+```
+
+The buyer cannot be the seller. Draft, sold, cancelled, and expired listings should not be shown as buyable.
+
+## P2P Wagers
+
+P2P wagers use on-chain Sui objects plus backend indexing/social state. In the current implementation these endpoints validate request data and Sui addresses, but they do not enforce the Kombat app JWT. The user still signs all on-chain PTBs with their Dynamic Sui wallet.
+
+### Create Wager
+
+First request a create PTB:
+
+```http
+POST /api/wagers/create-ptb
+Content-Type: application/json
+
+{
+  "initiator": "0x...",
+  "stake_usdc": 25000000,
+  "description": "Chelsea beats Arsenal",
+  "expiry_ts": 1782932400000,
+  "resolver": "0x...",
+  "network": "testnet",
+  "challenger_address": "0x...",
+  "initiator_option": "Chelsea"
+}
+```
+
+After the user signs and executes the Sui create transaction, index it:
+
+```http
+POST /api/wagers
+Content-Type: application/json
+
+{
+  "on_chain_address": "0x...",
+  "wager_id": 1,
+  "initiator": "0x...",
+  "challenger_address": "0x...",
+  "stake_usdc": 25000000,
+  "description": "Chelsea beats Arsenal",
+  "expiry_ts": 1782932400000,
+  "resolution_source": "manual",
+  "resolver": "0x...",
+  "initiator_option": "Chelsea",
+  "terms": {
+    "title": "Chelsea vs Arsenal wager",
+    "rules": ["Regulation time result"]
+  }
+}
+```
+
+If `terms` is present, the backend stores it on Walrus best-effort.
+
+### Discover Wagers
+
+```http
+GET /api/wagers?status=open&limit=20&offset=0
+GET /api/wagers/mine?wallet=0x...&limit=20&offset=0
+GET /api/wagers/:address
+```
+
+Filters:
+
+- `initiator`
+- `challenger`
+- `status`
+- `limit`
+- `offset`
+
+### Accept Wager
+
+1. Fetch accept PTB.
+2. Sign the accept transaction with Dynamic.
+3. Update backend status/social state.
+
+```http
+GET /api/wagers/:address/accept-ptb
+```
+
+```http
+POST /api/wagers/:address/accept
+Content-Type: application/json
+
+{
+  "challenger": "0x..."
+}
+```
+
+### Resolve Or Dispute
+
+Mutual winner declaration:
+
+```http
+POST /api/wagers/:address/declare-winner
+Content-Type: application/json
+
+{
+  "participant": "0x...",
+  "declared_winner": "0x..."
+}
+```
+
+If both participants declare the same winner, the backend resolves indexed state and attempts on-chain resolution with the configured resolver signer.
+
+Resolve PTB for resolver-driven client signing:
+
+```http
+GET /api/wagers/:address/resolve-ptb?winner=0x...
+```
+
+Disputes:
+
+```http
+POST /api/wagers/:address/disputes
+Content-Type: application/json
+
+{
+  "submitter": "0x...",
+  "description": "The match was cancelled.",
+  "declared_winner": "0x...",
+  "evidence": {
+    "sources": ["https://example.com/result"],
+    "notes": "Organizer announcement"
+  }
+}
+```
+
+```http
+GET /api/wagers/:address/disputes
+GET /api/wagers/:address/artifacts
+```
+
+Statuses supported by `POST /api/wagers/:address/status` are `open`, `active`, `cancelled`, `declined`, and `expired`.
+
+## Notifications
+
+Notification endpoints require the Kombat app JWT and the requested wallet must match the JWT wallet.
+
+```http
+GET /api/notifications/:wallet?limit=20&offset=0
+POST /api/notifications/:id/read
+GET /notifications/stream/:wallet
+GET /ws/notifications/:wallet
+```
+
+For SSE and websocket connections, send the JWT in the `Authorization` header. Do not use query-string tokens.
+
+Notification records:
+
+```ts
+type NotificationRecord = {
+  id: string;
+  user_wallet: string;
+  kind: string;
+  payload: {
+    title: string;
+    body: string;
+    action: {
+      label: string;
+      type: string;
+      method: string;
+      endpoint: string;
+      params: Record<string, unknown>;
+    };
+    entities: Record<string, unknown>;
+  } | null;
+  is_read: boolean;
+  created_at: string;
+};
+```
+
+Render `payload.title` and `payload.body`, then use `payload.action` for the primary CTA. Example actions include:
+
+- `open_onramp`
+- `open_tournament`
+- `open_payment_intent`
+- `open_receipt_listing`
+
+The websocket accepts JSON acknowledgements:
+
+```json
+{ "ack": "<notification-id>" }
+```
+
+## User Profiles
+
+Public profile and search:
+
+```http
+GET /api/users/:wallet
+POST /api/users/:wallet
+DELETE /api/users/:wallet
+GET /api/users/search?q=ola&limit=20
+GET /api/users/:wallet/stats
+GET /api/home/:wallet
+GET /api/users/:wallet/stakes?status=active&limit=20&offset=0
+GET /api/users/:wallet/stake-stats
+```
+
+Update profile:
+
+```json
+{
+  "email": "user@example.com",
+  "display_name": "Ola",
+  "avatar_url": "https://..."
+}
+```
+
+Notification preferences:
+
+```http
+GET /api/users/:wallet/notification-settings
+PUT /api/users/:wallet/notification-settings
+POST /api/users/:wallet/push-token
+```
+
+Push token body:
+
+```json
+{
+  "expo_token": "ExponentPushToken[...]"
+}
+```
+
+## Uploads
+
+```http
+POST /api/uploads
+Content-Type: multipart/form-data
+```
+
+Fields:
+
+- `file`: uploaded file
+- `type`: optional category, defaults to `general`
+
+Response data:
+
+```json
+{
+  "url": "https://..."
+}
+```
+
+Use uploads for public app media such as avatars or event images. Use Walrus artifacts for durable market evidence, rules, brackets, reports, and audit manifests.
+
+## Organizer Tournaments
+
+Organizer-created tournaments cover events PandaScore does not cover, such as CODM community tournaments.
+
+### Organizer Onboarding
+
+1. Organizer signs in with Dynamic.
+2. Organizer applies.
+3. Organizer starts KYC.
+4. Admin/provider reviews.
+5. Only `status = approved` and `kyc_status = verified` wallets can create organizer markets.
+
+Apply:
+
+```http
+POST /api/organizers/apply
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+
+{
+  "wallet_address": "0x...",
+  "organization_name": "Lagos CODM League",
+  "contact_email": "ops@example.com",
+  "website_url": "https://example.com",
+  "country": "NG",
+  "description": "Community CODM tournament organizer"
+}
+```
+
+Start KYC:
+
+```http
+POST /api/organizers/kyc-session
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+
+{
+  "wallet_address": "0x...",
+  "provider": "manual_review",
+  "return_url": "https://example.com/organizer/kyc"
+}
+```
+
+Get organizer profile:
+
+```http
+GET /api/organizers/:wallet
+Authorization: Bearer <accessToken>
+```
+
+This endpoint requires either the organizer's own JWT or admin credentials.
+
+### Create Organizer Market
+
+Create tournament:
+
+```http
+POST /api/organizer/tournaments
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+
+{
+  "organizer_wallet": "0x...",
+  "name": "CODM Lagos Invitational",
+  "videogame_name": "Call of Duty Mobile",
+  "videogame_slug": "codm",
+  "description": "Community bracket",
+  "rules_blob_id": "walrus_blob_rules",
+  "bracket_blob_id": "walrus_blob_bracket",
+  "starts_at": "2026-07-01T18:00:00Z"
+}
+```
+
+Create stakeable match:
+
+```http
+POST /api/organizer/tournaments/:id/matches
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+
+{
+  "organizer_wallet": "0x...",
+  "name": "Alpha Clan vs ZoneX",
+  "scheduled_at": "2026-07-01T19:00:00Z",
+  "match_type": "best_of",
+  "number_of_games": 3,
+  "opponents": [
+    { "pandascore_id": 0, "opponent_type": "Team", "name": "Alpha Clan" },
+    { "pandascore_id": 0, "opponent_type": "Team", "name": "ZoneX" }
+  ]
+}
+```
+
+Users discover organizer matches through normal `GET /api/tournaments`.
+
+List organizer tournaments:
+
+```http
+GET /api/organizer/tournaments?organizer_wallet=0x...&status=active&videogame=codm
+```
+
+## Outcome Proposals
+
+Organizer and agent results are submitted as proposals first. Approval can settle the match when a winner opponent id is present.
+
+Create proposal:
+
+```http
+POST /api/tournaments/:id/outcome-proposals
+Authorization: Bearer <accessToken>
+Content-Type: application/json
+
+{
+  "source": "organizer",
+  "proposer_wallet": "0x...",
+  "proposed_winner_opponent_id": "opponent-uuid",
+  "confidence": "0.9100",
+  "evidence_blob_id": "walrus_blob_result_evidence",
+  "evidence_url": "https://...",
+  "evidence_summary": "Organizer bracket and stream result match."
+}
+```
+
+List proposals for a match:
+
+```http
+GET /api/tournaments/:id/outcome-proposals
+```
+
+Admin review:
+
+```http
+POST /api/outcome-proposals/:id/review
+X-Admin-Token: <admin-token>
+Content-Type: application/json
+
+{
+  "decision": "approve",
+  "reviewer_wallet": "0x..."
+}
+```
+
+`approve` settles when the proposal includes `proposed_winner_opponent_id`. `reject` and `dispute` update proposal or verification status without settlement.
+
+## Walrus Artifacts
+
+Walrus stores public durable evidence. Use it for rules, brackets, screenshots, match reports, and audit manifests. Do not upload private KYC documents or sensitive user data unless a privacy layer is added.
 
 Config:
 
-- `WALRUS_ENABLED=false`
-- `WALRUS_NETWORK=testnet`
-- `WALRUS_PUBLISHER_URL=<publisher URL>`
-- `WALRUS_AGGREGATOR_URL=<aggregator URL>`
-- `WALRUS_EPOCHS=5`
-- `AGENT_API_TOKEN=<server-side agent token>`
+```http
+GET /api/walrus/config
+```
 
-Endpoints:
+Store artifact:
 
-- `GET /api/walrus/config`
-- `POST /api/walrus/artifacts` with a user JWT, `X-Admin-Token`, or `X-Agent-Token`
-- `GET /api/walrus/artifacts/:id`
-- `GET /api/walrus/blobs/:blob_id/url`
-- `POST /api/agents/outcome-proposals` with `X-Agent-Token`
-- `GET /api/admin/agent-runs` with `X-Admin-Token`
-- `GET /api/admin/agent-runs/:id` with `X-Admin-Token`
+```http
+POST /api/walrus/artifacts
+Authorization: Bearer <accessToken>
+Content-Type: application/json
 
-Agent outcome submissions create normal `source = agent` outcome proposals. Admin review still decides whether the match settles.
+{
+  "artifact_type": "bracket",
+  "owner_wallet": "0x...",
+  "match_id": "match-uuid",
+  "content_type": "application/json",
+  "manifest": {
+    "title": "CODM Lagos Invitational Bracket",
+    "sources": ["https://organizer.example/bracket"],
+    "notes": "Round one bracket published by organizer."
+  },
+  "metadata": {
+    "tournament_name": "CODM Lagos Invitational"
+  }
+}
+```
 
-## Funding / On-Ramp Endpoints
+Response data includes:
 
-- `GET /api/ramps/providers` returns available funding providers. Dynamic native is the default primary provider.
-- `POST /api/ramps/session` returns the frontend action needed to launch Dynamic's native funding flow. Requires `Authorization: Bearer <accessToken>` and a `wallet_address` matching the authenticated Dynamic wallet.
+- `blob_id`
+- `aggregator_url`
+- `blob_url`
+- indexed artifact fields
 
-## Transak Fallback Endpoints
+Save `blob_id` into `rules_blob_id`, `bracket_blob_id`, or `evidence_blob_id` when creating tournaments, matches, or proposals.
 
-- `GET /api/transak/config` returns on-ramp provider config and enabled status.
-- `POST /api/transak/quote` returns a live Transak quote. Requires `Authorization: Bearer <accessToken>`.
-- `POST /api/transak/widget-url` returns a locked Transak widget URL for the authenticated user's Sui wallet. Requires `Authorization: Bearer <accessToken>`.
+Other artifact routes:
+
+```http
+GET /api/walrus/artifacts/:id
+GET /api/walrus/blobs/:blob_id/url
+```
+
+Walrus artifact creation accepts one of:
+
+- User `Authorization: Bearer <accessToken>` with matching `owner_wallet`
+- `X-Admin-Token`
+- `X-Agent-Token`
+- `Authorization: Bearer <admin-or-agent-token>`
+
+## Agents
+
+Agents submit evidence-backed outcome proposals. This is mostly admin/operator surface, but the frontend admin dashboard can read the review data.
+
+Agent submission:
+
+```http
+POST /api/agents/outcome-proposals
+X-Agent-Token: <agent-token>
+Content-Type: application/json
+
+{
+  "match_id": "match-uuid",
+  "agent_name": "kombat-outcome-agent",
+  "watch_sources": ["organizer_site", "youtube_stream", "discord_announcement"],
+  "proposed_winner_opponent_id": "opponent-uuid",
+  "confidence": "0.9100",
+  "evidence_summary": "Agent found matching bracket update and stream result.",
+  "raw_output": {
+    "match_id": "match-uuid",
+    "winner": "Alpha Clan",
+    "source_data": [{ "url": "https://..." }],
+    "checks": ["bracket winner matched", "stream title matched"]
+  }
+}
+```
+
+`raw_output` is required and must contain enough schema data for backend validation.
+
+Admin agent routes:
+
+```http
+GET /api/admin/agent-runs?status=completed&limit=50
+GET /api/admin/agent-runs/:id
+```
+
+## Admin Dashboard
+
+Admin endpoints accept either `X-Admin-Token: <admin-token>` or `Authorization: Bearer <admin-token>`.
+
+```http
+GET /api/admin/organizers?status=pending&kyc_status=pending&limit=50
+GET /api/admin/organizers/:wallet
+POST /api/organizers/:wallet/review
+GET /api/admin/outcome-proposals?status=pending&source=agent&limit=50
+GET /api/admin/outcome-proposals/:id
+GET /api/admin/agent-runs?status=completed&limit=50
+GET /api/admin/agent-runs/:id
+POST /api/outcome-proposals/:id/review
+```
+
+Organizer review body:
+
+```json
+{
+  "status": "approved",
+  "kyc_status": "verified",
+  "kyc_provider": "manual_review",
+  "reviewed_by": "admin"
+}
+```
+
+## Transak Fallback
+
+Transak remains available only when configured.
+
+```http
+GET /api/transak/config
+POST /api/transak/quote
+POST /api/transak/widget-url
+```
+
+Use Dynamic native funding first. Only show Transak fallback when config says it is enabled and product requirements need it.
+
+## Legacy Pool Routes
+
+These routes still exist for admin tooling, backfills, and legacy flows:
+
+```http
+POST /api/tournaments/:id/calculate
+POST /api/tournaments/:id/stake
+GET /api/tournaments/:id/stakes
+POST /api/tournaments/:id/resolve
+POST /api/tournaments/:id/cancel
+POST /api/tournaments/:id/sync
+GET /api/users/:wallet/stakes
+GET /api/users/:wallet/stake-stats
+```
+
+For app staking, prefer payment intents and PTB signing. Do not build the primary mobile stake CTA on `POST /api/tournaments/:id/stake`.
+
+## Error Handling
+
+Wrapped error response:
+
+```json
+{
+  "success": false,
+  "data": null,
+  "error": "wallet in token does not match request"
+}
+```
+
+Common HTTP statuses:
+
+- `400`: validation failure, missing wallet in Dynamic token, bad Sui address, unsupported network, insufficient request data
+- `401`: missing/expired/invalid Kombat token, wallet mismatch, invalid admin or agent token
+- `404`: resource not found
+- `500`: backend configuration or provider error
+
+Recommended frontend behavior:
+
+- Show validation messages from `error`.
+- On `401`, clear the Kombat JWT and re-run Dynamic verify.
+- Do not retry protected calls without a token.
+- Treat PTB `can_build: false` as a UI-blocking state, not a crash.
+- For funding, refetch intent/dashboard after the Dynamic on-ramp flow completes.
+
+## Route Reference
+
+### Auth
+
+```text
+POST /api/auth/verify
+```
+
+### Sui
+
+```text
+GET /api/sui/config
+GET /api/sui/health
+GET /api/sui/wallets/:wallet/balances
+GET /api/sui/wallets/:wallet/usdc-balance
+GET /api/sui/wallets/:wallet/dashboard
+GET /api/sui/networks/:network/config
+GET /api/sui/networks/:network/health
+GET /api/sui/networks/:network/wallets/:wallet/balances
+GET /api/sui/networks/:network/wallets/:wallet/usdc-balance
+GET /api/sui/networks/:network/wallets/:wallet/dashboard
+```
+
+### Users
+
+```text
+GET /api/users/search
+GET /api/users/:wallet
+POST /api/users/:wallet
+DELETE /api/users/:wallet
+GET /api/home/:wallet
+GET /api/users/:wallet/stats
+GET /api/users/:wallet/stakes
+GET /api/users/:wallet/stake-stats
+GET /api/users/:wallet/notification-settings
+PUT /api/users/:wallet/notification-settings
+POST /api/users/:wallet/push-token
+```
+
+### Tournaments
+
+```text
+GET /api/tournaments
+POST /api/tournaments
+GET /api/tournaments/source/pandascore
+POST /api/tournaments/source/pandascore/sync
+GET /api/tournaments/:id
+GET /api/tournaments/:id/outcome-proposals
+POST /api/tournaments/:id/outcome-proposals
+POST /api/outcome-proposals/:id/review
+POST /api/tournaments/:id/calculate
+POST /api/tournaments/:id/stake
+GET /api/tournaments/:id/stakes
+POST /api/tournaments/:id/resolve
+POST /api/tournaments/:id/cancel
+POST /api/tournaments/:id/sync
+```
+
+### Organizer And Admin
+
+```text
+GET /api/organizer/tournaments
+POST /api/organizer/tournaments
+POST /api/organizer/tournaments/:id/matches
+POST /api/organizers/apply
+POST /api/organizers/kyc-session
+GET /api/organizers/:wallet
+POST /api/organizers/:wallet/review
+GET /api/admin/organizers
+GET /api/admin/organizers/:wallet
+GET /api/admin/outcome-proposals
+GET /api/admin/outcome-proposals/:id
+GET /api/admin/agent-runs
+GET /api/admin/agent-runs/:id
+```
+
+### Payments And Funding
+
+```text
+GET /api/ramps/providers
+POST /api/ramps/session
+POST /api/payments/intents
+GET /api/payments/intents/:id
+POST /api/payments/intents/:id/onramp-session
+GET /api/payments/intents/:id/ptb
+GET /api/transak/config
+POST /api/transak/quote
+POST /api/transak/widget-url
+```
+
+### Receipt Market
+
+```text
+POST /api/receipt-market/listings
+GET /api/receipt-market/listings
+GET /api/receipt-market/listings/:id
+POST /api/receipt-market/listings/:id/activate
+GET /api/receipt-market/listings/:id/list-ptb
+GET /api/receipt-market/listings/:id/buy-ptb
+POST /api/receipt-market/listings/:id/mark-sold
+```
+
+### P2P Wagers
+
+```text
+GET /api/wagers
+POST /api/wagers
+GET /api/wagers/mine
+POST /api/wagers/create-ptb
+GET /api/wagers/:address
+POST /api/wagers/:address/accept
+GET /api/wagers/:address/accept-ptb
+GET /api/wagers/:address/resolve-ptb
+POST /api/wagers/:address/status
+POST /api/wagers/:address/declare-winner
+GET /api/wagers/:address/artifacts
+GET /api/wagers/:address/disputes
+POST /api/wagers/:address/disputes
+```
+
+### Walrus, Agents, Notifications, Uploads
+
+```text
+GET /api/walrus/config
+POST /api/walrus/artifacts
+GET /api/walrus/artifacts/:id
+GET /api/walrus/blobs/:blob_id/url
+POST /api/agents/outcome-proposals
+GET /api/notifications/:wallet
+POST /api/notifications/:id/read
+GET /notifications/stream/:wallet
+GET /ws/notifications/:wallet
+POST /api/uploads
+```
+
+### Health And Metrics
+
+```text
+GET /health
+GET /metrics
+```
+
+## Frontend Checklist
+
+- Dynamic embedded wallets are enabled for Sui under Embedded Wallets settings.
+- Client creates Sui embedded wallet with chain `Sui`.
+- Dynamic JWT is exchanged through `POST /api/auth/verify`.
+- App stores and sends Kombat `accessToken`.
+- Protected wallet-bearing requests use the same wallet as the JWT.
+- Notification requests use headers, not query-string tokens.
+- Tournaments come from `/api/tournaments`.
+- Stake CTA uses payment intents.
+- Funding CTA opens Dynamic native on-ramp from ramp session response.
+- PTB screens handle `can_build: false` gracefully.
+- Micro-USDC is formatted for display and never sent as decimal dollars.
+- Organizer-created files and result evidence use Walrus artifacts.
+- Receipt market flows activate/mark-sold after successful Sui transactions.
+- `401` clears app token and re-verifies with Dynamic.

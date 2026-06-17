@@ -15,11 +15,11 @@ use std::sync::Arc;
 
 use crate::{
     models::{
-        AcceptWagerRequest, ApiResponse, ConsentRequest, CreateWagerRequest,
-        CreateWalrusArtifactRequest, DisputeSubmissionRecord, DisputeSubmissionRequest,
-        MineWagersQuery, PaymentMoveCall, PaymentPtbArgument, PaymentPtbStep,
-        UpdateWagerStatusRequest, WagerCreatePtbRequest, WagerDetailResponse, WagerListQuery,
-        WagerPtbResponse, WagerRecord, WagerResolvePtbQuery, WalrusArtifactRecord,
+        AcceptWagerRequest, ApiResponse, CancelWagerRequest, ConsentRequest, CreateWagerRequest,
+        CreateWalrusArtifactRequest, DeclineWagerRequest, DisputeSubmissionRecord,
+        DisputeSubmissionRequest, MineWagersQuery, PaymentMoveCall, PaymentPtbArgument,
+        PaymentPtbStep, UpdateWagerStatusRequest, WagerCreatePtbRequest, WagerDetailResponse,
+        WagerListQuery, WagerPtbResponse, WagerRecord, WagerResolvePtbQuery, WalrusArtifactRecord,
     },
     services::sui::SuiService,
     state::AppState,
@@ -63,14 +63,12 @@ pub async fn create_wager(
     if req.description.trim().is_empty() {
         return Err(bad_request("description is required"));
     }
-    let initiator = normalize(&req.initiator).ok_or_else(|| bad_request("Invalid initiator address"))?;
+    let initiator =
+        normalize(&req.initiator).ok_or_else(|| bad_request("Invalid initiator address"))?;
     let challenger = match req.challenger_address.as_ref() {
         Some(c) => Some(normalize(c).ok_or_else(|| bad_request("Invalid challenger address"))?),
         None => None,
     };
-
-    // A wager with a named challenger that has accepted is "active"; otherwise "open".
-    let status = if challenger.is_some() { "active" } else { "open" };
 
     let record = WagerRecord {
         id: uuid::Uuid::new_v4(),
@@ -80,7 +78,7 @@ pub async fn create_wager(
         challenger,
         stake_usdc: req.stake_usdc as i64,
         description: req.description.clone(),
-        status: status.to_string(),
+        status: "open".to_string(),
         resolution_source: req.resolution_source.clone(),
         resolver: req.resolver.clone(),
         expiry_ts: req.expiry_ts,
@@ -95,6 +93,8 @@ pub async fn create_wager(
         initiator_option: req.initiator_option.clone(),
         creator_declared_winner: None,
         challenger_declared_winner: None,
+        resolution_error: None,
+        resolution_attempted_at: None,
     };
 
     state
@@ -164,7 +164,8 @@ pub async fn accept_wager(
     Path(address): Path<String>,
     Json(req): Json<AcceptWagerRequest>,
 ) -> AppResult<WagerDetailResponse> {
-    let challenger = normalize(&req.challenger).ok_or_else(|| bad_request("Invalid challenger address"))?;
+    let challenger =
+        normalize(&req.challenger).ok_or_else(|| bad_request("Invalid challenger address"))?;
 
     let mut wager = state
         .db
@@ -176,8 +177,18 @@ pub async fn accept_wager(
     if wager.initiator == challenger {
         return Err(bad_request("Initiator cannot accept their own wager"));
     }
-    if matches!(wager.status.as_str(), "resolved" | "cancelled" | "expired" | "declined") {
-        return Err(bad_request(format!("Wager is {} and cannot be accepted", wager.status)));
+    if let Some(named_challenger) = wager.challenger.as_deref() {
+        if named_challenger != challenger {
+            return Err(bad_request(
+                "Only the named challenger can accept this wager",
+            ));
+        }
+    }
+    if wager.status != "open" {
+        return Err(bad_request(format!(
+            "Wager is {} and cannot be accepted",
+            wager.status
+        )));
     }
 
     wager.challenger = Some(challenger);
@@ -186,6 +197,83 @@ pub async fn accept_wager(
     state
         .db
         .upsert_wager(&wager)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+
+    fetch_detail(&state, &address).await
+}
+
+// ─── POST /api/wagers/:address/cancel ──────────────────────────────────────────
+
+/// Initiator records a signed on-chain cancel/refund for an open wager.
+pub async fn cancel_wager(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+    Json(req): Json<CancelWagerRequest>,
+) -> AppResult<WagerDetailResponse> {
+    let initiator =
+        normalize(&req.initiator).ok_or_else(|| bad_request("Invalid initiator address"))?;
+
+    let wager = state
+        .db
+        .get_wager_by_address(&address)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?
+        .ok_or_else(|| not_found("Wager not found"))?;
+
+    if wager.initiator != initiator {
+        return Err(bad_request("Only the initiator can cancel this wager"));
+    }
+    if wager.status != "open" {
+        return Err(bad_request(format!(
+            "Wager is {} and cannot be cancelled",
+            wager.status
+        )));
+    }
+
+    state
+        .db
+        .update_wager_status(&address, "cancelled")
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+
+    fetch_detail(&state, &address).await
+}
+
+// ─── POST /api/wagers/:address/decline ─────────────────────────────────────────
+
+/// Named challenger declines the social invite. The initiator must still cancel
+/// on-chain to reclaim escrowed funds.
+pub async fn decline_wager(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+    Json(req): Json<DeclineWagerRequest>,
+) -> AppResult<WagerDetailResponse> {
+    let challenger =
+        normalize(&req.challenger).ok_or_else(|| bad_request("Invalid challenger address"))?;
+
+    let wager = state
+        .db
+        .get_wager_by_address(&address)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?
+        .ok_or_else(|| not_found("Wager not found"))?;
+
+    if wager.challenger.as_deref() != Some(challenger.as_str()) {
+        return Err(bad_request(
+            "Only the named challenger can decline this wager",
+        ));
+    }
+    if wager.status != "open" {
+        return Err(bad_request(format!(
+            "Wager is {} and cannot be declined",
+            wager.status
+        )));
+    }
+
+    state
+        .db
+        .update_wager_status(&address, "declined")
         .await
         .map_err(|e| bad_request(e.to_string()))?;
 
@@ -221,6 +309,8 @@ pub struct DeclareWinnerResponse {
     pub resolved_winner: Option<String>,
     /// Set when the backend also resolved the wager on-chain and paid the winner.
     pub onchain_resolve_tx: Option<String>,
+    /// Set when backend attempted on-chain resolution but the resolver signer could not complete it.
+    pub onchain_resolve_error: Option<String>,
     pub wager: WagerDetailResponse,
 }
 
@@ -231,9 +321,10 @@ pub async fn declare_winner(
     Path(address): Path<String>,
     Json(req): Json<ConsentRequest>,
 ) -> AppResult<DeclareWinnerResponse> {
-    let participant = normalize(&req.participant).ok_or_else(|| bad_request("Invalid participant address"))?;
-    let declared_winner =
-        normalize(&req.declared_winner).ok_or_else(|| bad_request("Invalid declared_winner address"))?;
+    let participant =
+        normalize(&req.participant).ok_or_else(|| bad_request("Invalid participant address"))?;
+    let declared_winner = normalize(&req.declared_winner)
+        .ok_or_else(|| bad_request("Invalid declared_winner address"))?;
 
     let wager = state
         .db
@@ -248,8 +339,12 @@ pub async fn declare_winner(
         return Err(bad_request("participant is not part of this wager"));
     }
     // declared_winner must be one of the two participants
-    if declared_winner != wager.initiator && Some(declared_winner.as_str()) != wager.challenger.as_deref() {
-        return Err(bad_request("declared_winner must be a participant of the wager"));
+    if declared_winner != wager.initiator
+        && Some(declared_winner.as_str()) != wager.challenger.as_deref()
+    {
+        return Err(bad_request(
+            "declared_winner must be a participant of the wager",
+        ));
     }
 
     let resolved_winner = state
@@ -261,7 +356,7 @@ pub async fn declare_winner(
     // When both sides agreed, attempt the on-chain payout (best-effort). This
     // requires the wager's on-chain `resolver` to be the platform signer and
     // that signer to hold SUI for gas; failures are logged, not fatal.
-    let onchain_resolve_tx = if let Some(ref winner) = resolved_winner {
+    let (onchain_resolve_tx, onchain_resolve_error) = if let Some(ref winner) = resolved_winner {
         let network = state.sui.config().active_network.clone();
         match state
             .sui
@@ -270,21 +365,33 @@ pub async fn declare_winner(
         {
             Ok(digest) => {
                 tracing::info!(wager = %address, %digest, "Wager resolved on-chain");
-                Some(digest)
+                if let Err(e) = state.db.mark_wager_resolution_attempt(&address, None).await {
+                    tracing::warn!(wager = %address, "Failed to record resolution success: {}", e);
+                }
+                (Some(digest), None)
             }
             Err(e) => {
-                tracing::warn!(wager = %address, "On-chain wager resolve failed: {}", e);
-                None
+                let message = e.to_string();
+                tracing::warn!(wager = %address, "On-chain wager resolve failed: {}", message);
+                if let Err(db_error) = state
+                    .db
+                    .mark_wager_resolution_attempt(&address, Some(&message))
+                    .await
+                {
+                    tracing::warn!(wager = %address, "Failed to record resolution error: {}", db_error);
+                }
+                (None, Some(message))
             }
         }
     } else {
-        None
+        (None, None)
     };
 
     let detail = fetch_detail_raw(&state, &address).await?;
     Ok(Json(ApiResponse::ok(DeclareWinnerResponse {
         resolved_winner,
         onchain_resolve_tx,
+        onchain_resolve_error,
         wager: detail,
     })))
 }
@@ -297,12 +404,15 @@ pub async fn submit_dispute(
     Path(address): Path<String>,
     Json(req): Json<DisputeSubmissionRequest>,
 ) -> AppResult<DisputeSubmissionRecord> {
-    let submitter = normalize(&req.submitter).ok_or_else(|| bad_request("Invalid submitter address"))?;
+    let submitter =
+        normalize(&req.submitter).ok_or_else(|| bad_request("Invalid submitter address"))?;
     if req.description.trim().is_empty() {
         return Err(bad_request("description is required"));
     }
     let declared_winner = match req.declared_winner.as_ref() {
-        Some(w) => Some(normalize(w).ok_or_else(|| bad_request("Invalid declared_winner address"))?),
+        Some(w) => {
+            Some(normalize(w).ok_or_else(|| bad_request("Invalid declared_winner address"))?)
+        }
         None => None,
     };
 
@@ -572,6 +682,78 @@ pub async fn accept_wager_ptb(
                 description: "Call wager::accept_wager to lock the challenger's stake.".to_string(),
             },
         ],
+        move_call,
+    })))
+}
+
+/// GET /api/wagers/:address/cancel-ptb — transaction for an initiator refund.
+pub async fn cancel_wager_ptb(
+    State(state): State<Arc<AppState>>,
+    Path(address): Path<String>,
+) -> AppResult<WagerPtbResponse> {
+    let wager = state
+        .db
+        .get_wager_by_address(&address)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?
+        .ok_or_else(|| not_found("Wager not found"))?;
+
+    if wager.status != "open" {
+        return Err(bad_request(format!(
+            "Wager is {} and cannot be cancelled",
+            wager.status
+        )));
+    }
+
+    let network = state.sui.config().active_network.clone();
+    let (package_id, coin_type, wager_module, can_build, reason) =
+        match wager_build_context(&state, &network) {
+            Ok((p, c, m)) => (Some(p), Some(c), Some(m), true, None),
+            Err((reason, _)) => (None, None, None, false, reason),
+        };
+
+    let move_call = if can_build {
+        let package_id = package_id.clone().unwrap();
+        let coin_type = coin_type.clone().unwrap();
+        let wager_module = wager_module.unwrap();
+        Some(PaymentMoveCall {
+            target: format!("{}::{}::cancel_wager", package_id, wager_module),
+            package_id: package_id.clone(),
+            module: wager_module,
+            function: "cancel_wager".to_string(),
+            type_arguments: vec![coin_type.clone()],
+            arguments: vec![
+                PaymentPtbArgument {
+                    name: "wager".to_string(),
+                    kind: "shared_object".to_string(),
+                    value: Some(json!(address)),
+                    source: "wagers.on_chain_address".to_string(),
+                },
+                PaymentPtbArgument {
+                    name: "clock".to_string(),
+                    kind: "shared_object".to_string(),
+                    value: Some(json!("0x6")),
+                    source: "Sui Clock object".to_string(),
+                },
+            ],
+        })
+    } else {
+        None
+    };
+
+    Ok(Json(ApiResponse::ok(WagerPtbResponse {
+        wager_address: Some(address),
+        network,
+        can_build,
+        reason,
+        coin_type,
+        package_id,
+        expected_object_type: "Wager".to_string(),
+        steps: vec![PaymentPtbStep {
+            kind: "move_call".to_string(),
+            description: "Call wager::cancel_wager; sender must be the initiator and receives the escrowed stake."
+                .to_string(),
+        }],
         move_call,
     })))
 }

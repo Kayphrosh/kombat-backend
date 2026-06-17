@@ -35,7 +35,10 @@ impl PlatformSigner {
         let raw = std::env::var("PLATFORM_SIGNER_KEYPAIR").ok()?;
         let bytes: Vec<u8> = serde_json::from_str(&raw).ok()?;
         if bytes.len() != 64 {
-            tracing::warn!("PLATFORM_SIGNER_KEYPAIR must be 64 bytes; got {}", bytes.len());
+            tracing::warn!(
+                "PLATFORM_SIGNER_KEYPAIR must be 64 bytes; got {}",
+                bytes.len()
+            );
             return None;
         }
         let mut priv32 = [0u8; 32];
@@ -104,9 +107,9 @@ impl PlatformSigner {
                 function,
                 type_args,
                 args,
-                Value::Null,            // gas object — let the node pick
+                Value::Null, // gas object — let the node pick
                 gas_budget.to_string(),
-                Value::Null,            // execution mode
+                Value::Null, // execution mode
             ]),
         )
         .await?;
@@ -115,9 +118,7 @@ impl PlatformSigner {
             .get("txBytes")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("unsafe_moveCall returned no txBytes: {}", build))?;
-        let tx_bytes = B64
-            .decode(tx_bytes_b64)
-            .context("decode txBytes")?;
+        let tx_bytes = B64.decode(tx_bytes_b64).context("decode txBytes")?;
 
         // 2) Sign.
         let signature = self.serialize_signature(&tx_bytes);
@@ -141,7 +142,11 @@ impl PlatformSigner {
             .and_then(Value::as_str)
             .unwrap_or("unknown");
         if status != "success" {
-            return Err(anyhow!("transaction did not succeed ({}): {}", status, exec));
+            return Err(anyhow!(
+                "transaction did not succeed ({}): {}",
+                status,
+                exec
+            ));
         }
 
         let digest = exec
@@ -158,10 +163,10 @@ mod tests {
 
     // The 64-byte keypair currently in .env and its known Sui ed25519 address.
     const KEYPAIR: [u8; 64] = [
-        23, 51, 87, 62, 236, 68, 49, 254, 50, 243, 231, 232, 47, 10, 93, 111, 208, 175, 251, 2,
-        85, 119, 116, 69, 219, 68, 254, 33, 133, 121, 250, 203, 109, 157, 153, 91, 236, 47, 226,
-        231, 103, 89, 9, 34, 147, 33, 202, 15, 91, 162, 145, 172, 22, 239, 42, 33, 39, 134, 161,
-        164, 155, 41, 205, 32,
+        23, 51, 87, 62, 236, 68, 49, 254, 50, 243, 231, 232, 47, 10, 93, 111, 208, 175, 251, 2, 85,
+        119, 116, 69, 219, 68, 254, 33, 133, 121, 250, 203, 109, 157, 153, 91, 236, 47, 226, 231,
+        103, 89, 9, 34, 147, 33, 202, 15, 91, 162, 145, 172, 22, 239, 42, 33, 39, 134, 161, 164,
+        155, 41, 205, 32,
     ];
 
     // Live testnet round-trip of the build→sign→submit pipeline (the same path
@@ -184,7 +189,11 @@ mod tests {
 
         let create_digest = signer
             .move_call_execute(
-                &client, rpc_url, package, "wager", "create_wager",
+                &client,
+                rpc_url,
+                package,
+                "wager",
+                "create_wager",
                 vec![usdc.to_string()],
                 vec![
                     json!(usdc_coin),
@@ -203,7 +212,9 @@ mod tests {
 
         // Find the shared Wager object created by the tx.
         let tx = rpc(
-            &client, rpc_url, "sui_getTransactionBlock",
+            &client,
+            rpc_url,
+            "sui_getTransactionBlock",
             json!([create_digest, { "showObjectChanges": true }]),
         )
         .await
@@ -227,7 +238,11 @@ mod tests {
 
         let cancel_digest = signer
             .move_call_execute(
-                &client, rpc_url, package, "wager", "cancel_wager",
+                &client,
+                rpc_url,
+                package,
+                "wager",
+                "cancel_wager",
                 vec![usdc.to_string()],
                 vec![json!(wager_id), json!("0x6")],
                 100_000_000,
@@ -239,7 +254,10 @@ mod tests {
 
     #[test]
     fn derives_known_sui_address() {
-        std::env::set_var("PLATFORM_SIGNER_KEYPAIR", serde_json::to_string(&KEYPAIR.to_vec()).unwrap());
+        std::env::set_var(
+            "PLATFORM_SIGNER_KEYPAIR",
+            serde_json::to_string(&KEYPAIR.to_vec()).unwrap(),
+        );
         let signer = PlatformSigner::from_env().expect("signer loads");
         assert_eq!(
             signer.address(),

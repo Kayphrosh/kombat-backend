@@ -485,7 +485,7 @@ fn calculate_shortfall(
     let required = amount_usdc
         .checked_add(reserve_balance_usdc)
         .ok_or_else(|| bad_request("Payment amount plus reserve is too large"))?;
-    Ok(required.saturating_sub(current_balance_usdc))
+    Ok(required.saturating_sub(current_balance_usdc).max(0))
 }
 
 fn build_intent_response(
@@ -499,7 +499,9 @@ fn build_intent_response(
         .amount_usdc
         .checked_add(intent.reserve_balance_usdc)
         .ok_or_else(|| bad_request("Payment amount plus reserve is too large"))?;
-    let funding_shortfall_usdc = required_balance_usdc.saturating_sub(current_balance_usdc);
+    let funding_shortfall_usdc = required_balance_usdc
+        .saturating_sub(current_balance_usdc)
+        .max(0);
 
     let mut rules = Vec::new();
     if intent.reserve_balance_usdc > 0 {
@@ -522,4 +524,26 @@ fn build_intent_response(
         match_name: match_with_odds.match_info.name.clone(),
         opponent_name: opponent.opponent.name.clone(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::calculate_shortfall;
+
+    fn shortfall(amount_usdc: i64, reserve_balance_usdc: i64, current_balance_usdc: i64) -> i64 {
+        match calculate_shortfall(amount_usdc, reserve_balance_usdc, current_balance_usdc) {
+            Ok(value) => value,
+            Err(_) => panic!("shortfall calculation failed"),
+        }
+    }
+
+    #[test]
+    fn calculate_shortfall_clamps_to_zero_when_wallet_has_enough_balance() {
+        assert_eq!(shortfall(50_000_000, 0, 75_000_000), 0);
+    }
+
+    #[test]
+    fn calculate_shortfall_includes_reserve_balance() {
+        assert_eq!(shortfall(50_000_000, 5_000_000, 20_000_000), 35_000_000);
+    }
 }
