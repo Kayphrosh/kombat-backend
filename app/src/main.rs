@@ -57,15 +57,15 @@ use handlers::user::{
     delete_user, get_home_summary, get_notification_settings, get_user_profile, get_user_stats,
     register_push_token, search_users, update_notification_settings, update_user_profile,
 };
+use handlers::wager::{
+    accept_wager, accept_wager_ptb, cancel_wager, cancel_wager_ptb, create_wager, create_wager_ptb,
+    declare_winner, decline_wager, get_wager, list_disputes, list_my_wagers, list_wager_artifacts,
+    list_wagers, resolve_wager_ptb, submit_dispute, update_wager_status,
+};
 use handlers::walrus::{
     create_walrus_artifact, get_walrus_artifact, get_walrus_blob_url, get_walrus_config,
 };
 use handlers::webhook::{handle_match_result_webhook, handle_pandascore_webhook};
-use handlers::wager::{
-    accept_wager, accept_wager_ptb, create_wager, create_wager_ptb, declare_winner, get_wager,
-    list_disputes, list_my_wagers, list_wager_artifacts, list_wagers, resolve_wager_ptb,
-    submit_dispute, update_wager_status,
-};
 use prometheus::{Encoder, IntCounter, TextEncoder};
 use services::{
     DbService, PandaScoreConfig, PandaScoreService, RampConfig, RampService, SuiConfig, SuiService,
@@ -343,6 +343,9 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/wagers/:address", get(get_wager))
         .route("/api/wagers/:address/accept", post(accept_wager))
         .route("/api/wagers/:address/accept-ptb", get(accept_wager_ptb))
+        .route("/api/wagers/:address/cancel", post(cancel_wager))
+        .route("/api/wagers/:address/cancel-ptb", get(cancel_wager_ptb))
+        .route("/api/wagers/:address/decline", post(decline_wager))
         .route("/api/wagers/:address/resolve-ptb", get(resolve_wager_ptb))
         .route("/api/wagers/:address/status", post(update_wager_status))
         .route("/api/wagers/:address/declare-winner", post(declare_winner))

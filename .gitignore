@@ -15,3 +15,4 @@ sui-wager/build/
 
 # Markdown docs
 *.md
+!FRONTEND_INTEGRATION.md

@@ -29,6 +29,8 @@ struct WagerWithUsersRow {
     pub initiator_option: Option<String>,
     pub creator_declared_winner: Option<String>,
     pub challenger_declared_winner: Option<String>,
+    pub resolution_error: Option<String>,
+    pub resolution_attempted_at: Option<chrono::DateTime<chrono::Utc>>,
     pub initiator_name: Option<String>,
     pub initiator_avatar: Option<String>,
     pub challenger_name: Option<String>,
@@ -266,11 +268,12 @@ impl DbService {
                 resolver, expiry_ts, created_at, resolved_at, winner,
                 protocol_fee_bps, oracle_feed, oracle_target,
                 dispute_opened_at, dispute_opener, initiator_option,
-                creator_declared_winner, challenger_declared_winner
+                creator_declared_winner, challenger_declared_winner,
+                resolution_error, resolution_attempted_at
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                 $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-                $21, $22
+                $21, $22, $23, $24
             )
             ON CONFLICT (on_chain_address) DO UPDATE SET
                 challenger       = EXCLUDED.challenger,
@@ -278,7 +281,9 @@ impl DbService {
                 resolved_at      = EXCLUDED.resolved_at,
                 winner           = EXCLUDED.winner,
                 dispute_opened_at = EXCLUDED.dispute_opened_at,
-                dispute_opener   = EXCLUDED.dispute_opener
+                dispute_opener   = EXCLUDED.dispute_opener,
+                resolution_error = EXCLUDED.resolution_error,
+                resolution_attempted_at = EXCLUDED.resolution_attempted_at
             "#,
         )
         .bind(&w.id)
@@ -303,6 +308,8 @@ impl DbService {
         .bind(&w.initiator_option)
         .bind(&w.creator_declared_winner)
         .bind(&w.challenger_declared_winner)
+        .bind(&w.resolution_error)
+        .bind(w.resolution_attempted_at)
         .execute(&self.pool)
         .await?;
         Ok(())
@@ -316,7 +323,8 @@ impl DbService {
                 resolver, expiry_ts, created_at, resolved_at, winner,
                 protocol_fee_bps, oracle_feed, oracle_target,
                 dispute_opened_at, dispute_opener, initiator_option,
-                creator_declared_winner, challenger_declared_winner
+                creator_declared_winner, challenger_declared_winner,
+                resolution_error, resolution_attempted_at
               FROM wagers WHERE on_chain_address = $1"#,
         )
         .bind(address)
@@ -338,6 +346,7 @@ impl DbService {
                 w.protocol_fee_bps, w.oracle_feed, w.oracle_target,
                 w.dispute_opened_at, w.dispute_opener, w.initiator_option,
                 w.creator_declared_winner, w.challenger_declared_winner,
+                w.resolution_error, w.resolution_attempted_at,
                 ui.display_name AS initiator_name,
                 ui.avatar_url AS initiator_avatar,
                 uc.display_name AS challenger_name,
@@ -364,7 +373,8 @@ impl DbService {
                resolver, expiry_ts, created_at, resolved_at, winner,
                protocol_fee_bps, oracle_feed, oracle_target,
                dispute_opened_at, dispute_opener, initiator_option,
-               creator_declared_winner, challenger_declared_winner
+               creator_declared_winner, challenger_declared_winner,
+               resolution_error, resolution_attempted_at
                FROM wagers WHERE 1=1"#,
         );
 
@@ -431,6 +441,7 @@ impl DbService {
                         w.protocol_fee_bps, w.oracle_feed, w.oracle_target,
                         w.dispute_opened_at, w.dispute_opener, w.initiator_option,
                         w.creator_declared_winner, w.challenger_declared_winner,
+                        w.resolution_error, w.resolution_attempted_at,
                         ui.display_name AS initiator_name,
                         ui.avatar_url AS initiator_avatar,
                         uc.display_name AS challenger_name,
@@ -466,6 +477,7 @@ impl DbService {
                         w.protocol_fee_bps, w.oracle_feed, w.oracle_target,
                         w.dispute_opened_at, w.dispute_opener, w.initiator_option,
                         w.creator_declared_winner, w.challenger_declared_winner,
+                        w.resolution_error, w.resolution_attempted_at,
                         ui.display_name AS initiator_name,
                         ui.avatar_url AS initiator_avatar,
                         uc.display_name AS challenger_name,
@@ -517,6 +529,21 @@ impl DbService {
         Ok(())
     }
 
+    pub async fn mark_wager_resolution_attempt(
+        &self,
+        address: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        sqlx::query(
+            "UPDATE wagers SET resolution_error = $1, resolution_attempted_at = NOW() WHERE on_chain_address = $2",
+        )
+        .bind(error)
+        .bind(address)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Store which winner a participant declared and auto-resolve if both agree.
     pub async fn set_declared_winner(
         &self,
@@ -550,7 +577,7 @@ impl DbService {
             if creator_pick == challenger_pick {
                 // Both agree — mark as resolved
                 sqlx::query(
-                    "UPDATE wagers SET status = 'resolved', winner = $1, resolved_at = NOW() WHERE on_chain_address = $2"
+                    "UPDATE wagers SET status = 'resolved', winner = $1, resolved_at = NOW(), resolution_error = NULL WHERE on_chain_address = $2"
                 )
                 .bind(&creator_pick)
                 .bind(address)
@@ -1954,6 +1981,7 @@ impl DbService {
         current_balance_usdc: i64,
         funding_shortfall_usdc: i64,
     ) -> Result<crate::models::PaymentIntentRecord> {
+        let funding_shortfall_usdc = funding_shortfall_usdc.max(0);
         let status = if funding_shortfall_usdc > 0 {
             "requires_funding"
         } else {
@@ -2007,6 +2035,7 @@ impl DbService {
         current_balance_usdc: i64,
         funding_shortfall_usdc: i64,
     ) -> Result<crate::models::PaymentIntentRecord> {
+        let funding_shortfall_usdc = funding_shortfall_usdc.max(0);
         let status = if funding_shortfall_usdc > 0 {
             "requires_funding"
         } else {
@@ -2777,6 +2806,23 @@ impl DbService {
         row: WagerWithUsersRow,
         context_wallet: Option<&str>,
     ) -> crate::models::WagerDetailResponse {
+        let expiry_unit = if row.expiry_ts < 1_000_000_000_000 {
+            "seconds"
+        } else {
+            "milliseconds"
+        };
+        let expiry_ms = if expiry_unit == "seconds" {
+            row.expiry_ts.saturating_mul(1000)
+        } else {
+            row.expiry_ts
+        };
+        let address_format = if row.on_chain_address.starts_with("0x") {
+            "sui"
+        } else {
+            "legacy"
+        };
+        let is_legacy = expiry_unit == "seconds" || address_format != "sui";
+
         let wager = WagerRecord {
             id: row.id,
             on_chain_address: row.on_chain_address,
@@ -2800,6 +2846,8 @@ impl DbService {
             initiator_option: row.initiator_option,
             creator_declared_winner: row.creator_declared_winner,
             challenger_declared_winner: row.challenger_declared_winner,
+            resolution_error: row.resolution_error.clone(),
+            resolution_attempted_at: row.resolution_attempted_at,
         };
 
         let challenger_option = wager.initiator_option.as_ref().map(|opt| {
@@ -2823,6 +2871,8 @@ impl DbService {
             ),
             _ => (None, None, None),
         };
+        let resolution_error = wager.resolution_error.clone();
+        let resolution_attempted_at = wager.resolution_attempted_at;
 
         crate::models::WagerDetailResponse {
             wager,
@@ -2834,6 +2884,12 @@ impl DbService {
             opponent_wallet,
             opponent_name,
             opponent_avatar,
+            expiry_ms,
+            expiry_unit: expiry_unit.to_string(),
+            address_format: address_format.to_string(),
+            is_legacy,
+            resolution_error,
+            resolution_attempted_at,
         }
     }
 
@@ -2854,6 +2910,7 @@ impl DbService {
                 w.protocol_fee_bps, w.oracle_feed, w.oracle_target,
                 w.dispute_opened_at, w.dispute_opener, w.initiator_option,
                 w.creator_declared_winner, w.challenger_declared_winner,
+                w.resolution_error, w.resolution_attempted_at,
                 ui.display_name AS initiator_name,
                 ui.avatar_url AS initiator_avatar,
                 uc.display_name AS challenger_name,
