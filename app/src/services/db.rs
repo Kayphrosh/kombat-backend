@@ -1861,9 +1861,12 @@ impl DbService {
 
         let total_pool_usdc: i64 = opponents.iter().map(|o| o.pool_usdc).sum();
         let total_stakers: i64 = opponents.iter().map(|o| o.staker_count).sum();
+        let pool_object_id = match_record.sui_pool_object_id.clone();
 
         Ok(Some(crate::models::MatchWithOdds {
             pool_configured: match_record.sui_pool_object_id.is_some(),
+            pool_object_id: pool_object_id.clone(),
+            sui_pool_object_id: pool_object_id,
             match_info: match_record,
             opponents,
             total_pool_usdc,
@@ -1907,6 +1910,32 @@ impl DbService {
         .ok_or_else(|| anyhow::anyhow!("Match not found"))?;
 
         Ok(row)
+    }
+
+    pub async fn list_matches_missing_pool(
+        &self,
+        match_ids: Option<&[uuid::Uuid]>,
+        limit: i64,
+    ) -> Result<Vec<crate::models::MatchRecord>> {
+        let limit = limit.clamp(1, 100);
+        let mut qb = sqlx::QueryBuilder::new(
+            r#"SELECT *
+               FROM matches
+               WHERE sui_pool_object_id IS NULL
+                 AND status IN ('upcoming', 'live')"#,
+        );
+
+        if let Some(match_ids) = match_ids {
+            qb.push(" AND id = ANY(").push_bind(match_ids).push(")");
+        }
+
+        qb.push(" ORDER BY scheduled_at ASC NULLS LAST, created_at ASC LIMIT ")
+            .push_bind(limit);
+
+        Ok(qb
+            .build_query_as::<crate::models::MatchRecord>()
+            .fetch_all(&self.pool)
+            .await?)
     }
 
     /// Matches that are past their scheduled time, still open, have a
@@ -2071,9 +2100,12 @@ impl DbService {
             let opponents = self.get_opponents_with_pools(m.id).await?;
             let total_pool_usdc: i64 = opponents.iter().map(|o| o.pool_usdc).sum();
             let total_stakers: i64 = opponents.iter().map(|o| o.staker_count).sum();
+            let pool_object_id = m.sui_pool_object_id.clone();
 
             result.push(crate::models::MatchWithOdds {
                 pool_configured: m.sui_pool_object_id.is_some(),
+                pool_object_id: pool_object_id.clone(),
+                sui_pool_object_id: pool_object_id,
                 match_info: m,
                 opponents,
                 total_pool_usdc,

@@ -269,6 +269,7 @@ The `MatchWithOdds` response contains:
 
 - `match_info`: tournament/match metadata, status, timing, Sui pool object ID.
 - `pool_configured`: `true` only when `match_info.sui_pool_object_id` is present.
+- `pool_object_id` / `sui_pool_object_id`: top-level aliases for the configured pool object.
 - `opponents`: exactly two sides for stakeable binary markets.
 - pool/odds data used for display and payout estimates.
 
@@ -1054,6 +1055,27 @@ X-Admin-Token: <AUTH_ADMIN_TOKEN>
   "sui_pool_object_id": "0x..."
 }
 ```
+
+The backend can also create and register missing pools in one admin backfill call when these env vars are configured:
+
+- `PLATFORM_SIGNER_KEYPAIR`: funded Sui signer that owns the staking `AdminCap`.
+- `SUI_PACKAGE_ID` or `SUI_TESTNET_PACKAGE_ID`: package containing `tournament_staking`.
+- `SUI_ADMIN_CAP_OBJECT_ID` or `SUI_TESTNET_ADMIN_CAP_OBJECT_ID`: staking `AdminCap` object.
+- `SUI_USDC_COIN_TYPE` or `SUI_TESTNET_USDC_COIN_TYPE`: coin type used by pools.
+
+```http
+POST /api/admin/tournaments/pools/backfill
+X-Admin-Token: <AUTH_ADMIN_TOKEN>
+
+{
+  "sui_network": "testnet",
+  "limit": 25,
+  "match_ids": ["<optional-match-uuid>"],
+  "default_stake_window_hours": 72
+}
+```
+
+The response lists each attempted match, the created `pool_object_id`, transaction digest, or the per-match failure reason.
 
 PandaScore sync/backfill payloads may also include `sui_network` and `sui_pool_object_id`; ordinary syncs preserve any existing pool object when those fields are omitted.
 

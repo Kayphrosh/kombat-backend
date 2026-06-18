@@ -3,6 +3,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     Json,
 };
+use chrono::{Duration, Utc};
 use serde_json::json;
 use std::sync::Arc;
 
@@ -322,6 +323,154 @@ pub async fn configure_tournament_pool(
         .ok_or_else(|| internal_error("Match not found after pool configuration"))?;
 
     Ok(Json(ApiResponse::ok(match_with_odds)))
+}
+
+pub async fn backfill_tournament_pools(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<BackfillMatchPoolsRequest>,
+) -> AppResult<MatchPoolBackfillResponse> {
+    verify_admin(&headers)?;
+
+    let network = req
+        .sui_network
+        .unwrap_or_else(|| state.sui.config().active_network.clone());
+    let network_config = state
+        .sui
+        .config()
+        .network(&network)
+        .ok_or_else(|| bad_request("Unsupported Sui network"))?;
+    let network = network_config.network.clone();
+    let limit = req.limit.unwrap_or(25);
+    let default_stake_window_hours = req.default_stake_window_hours.unwrap_or(72).clamp(1, 720);
+
+    let matches = state
+        .db
+        .list_matches_missing_pool(req.match_ids.as_deref(), limit)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+
+    let mut entries = Vec::with_capacity(matches.len());
+    let mut created = 0usize;
+    let mut skipped = 0usize;
+    let mut failed = 0usize;
+
+    for match_record in matches {
+        let opponents = match state.db.get_match_opponents(match_record.id).await {
+            Ok(opponents) => opponents,
+            Err(e) => {
+                failed += 1;
+                entries.push(MatchPoolBackfillEntry {
+                    match_id: match_record.id,
+                    match_name: match_record.name,
+                    status: match_record.status,
+                    created: false,
+                    pool_object_id: None,
+                    tx_digest: None,
+                    reason: Some(format!("failed_to_load_opponents: {}", e)),
+                });
+                continue;
+            }
+        };
+
+        if opponents.len() != 2 {
+            skipped += 1;
+            entries.push(MatchPoolBackfillEntry {
+                match_id: match_record.id,
+                match_name: match_record.name,
+                status: match_record.status,
+                created: false,
+                pool_object_id: None,
+                tx_digest: None,
+                reason: Some("expected_exactly_two_opponents".to_string()),
+            });
+            continue;
+        }
+
+        let stake_deadline_ms = pool_stake_deadline_ms(&match_record, default_stake_window_hours);
+
+        match state
+            .sui
+            .create_tournament_pool_on_chain(
+                &network,
+                &match_record.id.to_string(),
+                &opponents[0].name,
+                &opponents[1].name,
+                stake_deadline_ms,
+            )
+            .await
+        {
+            Ok(pool) => {
+                let pool_object_id = pool.pool_object_id.clone();
+                match state
+                    .db
+                    .configure_match_pool(match_record.id, Some(&network), &pool_object_id)
+                    .await
+                {
+                    Ok(_) => {
+                        created += 1;
+                        entries.push(MatchPoolBackfillEntry {
+                            match_id: match_record.id,
+                            match_name: match_record.name,
+                            status: match_record.status,
+                            created: true,
+                            pool_object_id: Some(pool_object_id),
+                            tx_digest: Some(pool.digest),
+                            reason: None,
+                        });
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        entries.push(MatchPoolBackfillEntry {
+                            match_id: match_record.id,
+                            match_name: match_record.name,
+                            status: match_record.status,
+                            created: false,
+                            pool_object_id: Some(pool_object_id),
+                            tx_digest: Some(pool.digest),
+                            reason: Some(format!("created_on_chain_but_db_update_failed: {}", e)),
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                failed += 1;
+                entries.push(MatchPoolBackfillEntry {
+                    match_id: match_record.id,
+                    match_name: match_record.name,
+                    status: match_record.status,
+                    created: false,
+                    pool_object_id: None,
+                    tx_digest: None,
+                    reason: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::ok(MatchPoolBackfillResponse {
+        network,
+        attempted: entries.len(),
+        created,
+        skipped,
+        failed,
+        entries,
+    })))
+}
+
+fn pool_stake_deadline_ms(match_record: &MatchRecord, default_stake_window_hours: i64) -> u64 {
+    let now = Utc::now();
+    let deadline = [
+        match_record.begin_at,
+        match_record.scheduled_at,
+        match_record.end_at,
+    ]
+    .into_iter()
+    .flatten()
+    .find(|dt| *dt > now)
+    .unwrap_or_else(|| now + Duration::hours(default_stake_window_hours));
+
+    deadline.timestamp_millis().max(0) as u64
 }
 
 pub async fn create_organizer_tournament(

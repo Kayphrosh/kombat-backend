@@ -45,12 +45,12 @@ use handlers::sui::{
     get_wallet_usdc_balance,
 };
 use handlers::tournament::{
-    calculate_payout, cancel_tournament, configure_tournament_pool, create_organizer_match,
-    create_organizer_tournament, create_outcome_proposal, create_tournament, get_tournament,
-    get_tournament_source_pandascore, get_user_stake_stats, get_user_stakes,
-    list_organizer_tournaments, list_outcome_proposals, list_tournament_stakes, list_tournaments,
-    place_stake, resolve_tournament, review_outcome_proposal, sync_pandascore_tournaments,
-    sync_tournament,
+    backfill_tournament_pools, calculate_payout, cancel_tournament, configure_tournament_pool,
+    create_organizer_match, create_organizer_tournament, create_outcome_proposal,
+    create_tournament, get_tournament, get_tournament_source_pandascore, get_user_stake_stats,
+    get_user_stakes, list_organizer_tournaments, list_outcome_proposals, list_tournament_stakes,
+    list_tournaments, place_stake, resolve_tournament, review_outcome_proposal,
+    sync_pandascore_tournaments, sync_tournament,
 };
 use handlers::transak::{create_transak_widget_url, get_transak_config, get_transak_quote};
 use handlers::upload::upload_file;
@@ -375,6 +375,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/admin/tournaments/:id/pool",
             post(configure_tournament_pool),
+        )
+        .route(
+            "/api/admin/tournaments/pools/backfill",
+            post(backfill_tournament_pools),
         )
         .route(
             "/api/tournaments/:id/outcome-proposals",
