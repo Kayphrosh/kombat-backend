@@ -28,6 +28,12 @@ pub struct PlatformSigner {
     address: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ExecutedMoveCall {
+    pub digest: String,
+    pub response: Value,
+}
+
 impl PlatformSigner {
     /// Load from `PLATFORM_SIGNER_KEYPAIR` — a JSON array of 64 bytes
     /// (`[priv32 || pub32]`, Solana-style). Returns None if unset/invalid.
@@ -95,6 +101,27 @@ impl PlatformSigner {
         args: Vec<Value>,
         gas_budget: u64,
     ) -> Result<String> {
+        Ok(self
+            .move_call_execute_detailed(
+                client, rpc_url, package, module, function, type_args, args, gas_budget,
+            )
+            .await?
+            .digest)
+    }
+
+    /// Build, sign and execute a Move call. Returns the digest and full RPC
+    /// response so callers can inspect object changes emitted by the tx.
+    pub async fn move_call_execute_detailed(
+        &self,
+        client: &reqwest::Client,
+        rpc_url: &str,
+        package: &str,
+        module: &str,
+        function: &str,
+        type_args: Vec<String>,
+        args: Vec<Value>,
+        gas_budget: u64,
+    ) -> Result<ExecutedMoveCall> {
         // 1) Build the transaction (fullnode selects gas + object refs).
         let build = rpc(
             client,
@@ -131,7 +158,7 @@ impl PlatformSigner {
             json!([
                 tx_bytes_b64,
                 [signature],
-                { "showEffects": true },
+                { "showEffects": true, "showObjectChanges": true },
                 "WaitForLocalExecution"
             ]),
         )
@@ -153,7 +180,10 @@ impl PlatformSigner {
             .get("digest")
             .and_then(Value::as_str)
             .ok_or_else(|| anyhow!("execute returned no digest: {}", exec))?;
-        Ok(digest.to_string())
+        Ok(ExecutedMoveCall {
+            digest: digest.to_string(),
+            response: exec,
+        })
     }
 }
 

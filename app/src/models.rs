@@ -511,6 +511,8 @@ pub struct MatchWithOdds {
     #[serde(flatten)]
     pub match_info: MatchRecord,
     pub pool_configured: bool,
+    pub pool_object_id: Option<String>,
+    pub sui_pool_object_id: Option<String>,
     pub opponents: Vec<OpponentWithPool>,
     pub total_pool_usdc: i64,
     pub total_stakers: i64,
@@ -635,6 +637,35 @@ pub struct CreateOpponentRequest {
 pub struct ConfigureMatchPoolRequest {
     pub sui_network: Option<String>,
     pub sui_pool_object_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BackfillMatchPoolsRequest {
+    pub sui_network: Option<String>,
+    pub match_ids: Option<Vec<Uuid>>,
+    pub limit: Option<i64>,
+    pub default_stake_window_hours: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MatchPoolBackfillEntry {
+    pub match_id: Uuid,
+    pub match_name: String,
+    pub status: String,
+    pub created: bool,
+    pub pool_object_id: Option<String>,
+    pub tx_digest: Option<String>,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MatchPoolBackfillResponse {
+    pub network: String,
+    pub attempted: usize,
+    pub created: usize,
+    pub skipped: usize,
+    pub failed: usize,
+    pub entries: Vec<MatchPoolBackfillEntry>,
 }
 
 #[derive(Debug, Deserialize)]

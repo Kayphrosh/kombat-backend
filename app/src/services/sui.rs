@@ -17,6 +17,7 @@ pub struct SuiNetworkConfig {
     pub network: String,
     pub rpc_url: String,
     pub package_id: Option<String>,
+    pub admin_cap_object_id: Option<String>,
     /// Wager lives in its own published package (separate from staking).
     pub wager_package_id: Option<String>,
     pub usdc_coin_type: Option<String>,
@@ -95,6 +96,12 @@ pub struct SuiCoinBalance {
     pub locked_balance: Value,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CreatedTournamentPool {
+    pub digest: String,
+    pub pool_object_id: String,
+}
+
 impl SuiService {
     pub fn new(config: SuiConfig) -> Self {
         Self {
@@ -152,6 +159,67 @@ impl SuiService {
                 100_000_000, // 0.1 SUI gas budget
             )
             .await
+    }
+
+    pub async fn create_tournament_pool_on_chain(
+        &self,
+        network: &str,
+        match_id: &str,
+        outcome_a: &str,
+        outcome_b: &str,
+        stake_deadline_ms: u64,
+    ) -> anyhow::Result<CreatedTournamentPool> {
+        let cfg = self
+            .config
+            .network(network)
+            .ok_or_else(|| anyhow::anyhow!("Unsupported Sui network: {}", network))?;
+        let package = cfg
+            .package_id
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("staking package_id not configured for {}", network))?;
+        let admin_cap = cfg.admin_cap_object_id.clone().ok_or_else(|| {
+            anyhow::anyhow!("staking admin cap object id not configured for {}", network)
+        })?;
+        let coin_type = cfg
+            .usdc_coin_type
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("usdc_coin_type not configured for {}", network))?;
+
+        let signer = crate::services::sui_tx::PlatformSigner::from_env()
+            .ok_or_else(|| anyhow::anyhow!("PLATFORM_SIGNER_KEYPAIR not configured"))?;
+
+        let executed = signer
+            .move_call_execute_detailed(
+                &self.client,
+                &cfg.rpc_url,
+                &package,
+                &cfg.staking_module,
+                "create_pool",
+                vec![coin_type],
+                vec![
+                    serde_json::json!(admin_cap),
+                    serde_json::json!(match_id),
+                    serde_json::json!(outcome_a),
+                    serde_json::json!(outcome_b),
+                    serde_json::json!(stake_deadline_ms.to_string()),
+                    serde_json::json!("0x6"),
+                ],
+                100_000_000,
+            )
+            .await?;
+
+        let pool_object_id = find_created_object(&executed.response, &format!("::{}::TournamentPool", cfg.staking_module))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "create_pool succeeded but no TournamentPool object was found in object changes: {}",
+                    executed.response
+                )
+            })?;
+
+        Ok(CreatedTournamentPool {
+            digest: executed.digest,
+            pool_object_id,
+        })
     }
 
     pub fn platform_signer_address() -> Option<String> {
@@ -302,6 +370,12 @@ fn network_from_env(network: &str, active_network: &str) -> SuiNetworkConfig {
         active_prefix.get(1).cloned().unwrap_or_default(),
     ]);
 
+    let admin_cap_object_id = env_first(&[
+        format!("{}_ADMIN_CAP_OBJECT_ID", prefix),
+        "SUI_ADMIN_CAP_OBJECT_ID".to_string(),
+    ])
+    .and_then(|address| SuiService::normalize_address(&address));
+
     let wager_package_id = env_first(&[
         format!("{}_WAGER_PACKAGE_ID", prefix),
         "SUI_WAGER_PACKAGE_ID".to_string(),
@@ -317,12 +391,30 @@ fn network_from_env(network: &str, active_network: &str) -> SuiNetworkConfig {
         network: network.to_string(),
         rpc_url,
         package_id,
+        admin_cap_object_id,
         wager_package_id,
         usdc_coin_type,
         staking_module: std::env::var("SUI_STAKING_MODULE")
             .unwrap_or_else(|_| "tournament_staking".to_string()),
         wager_module: std::env::var("SUI_WAGER_MODULE").unwrap_or_else(|_| "wager".to_string()),
     }
+}
+
+fn find_created_object(response: &Value, object_type_suffix: &str) -> Option<String> {
+    response
+        .get("objectChanges")
+        .and_then(Value::as_array)?
+        .iter()
+        .find(|change| {
+            change.get("type").and_then(Value::as_str) == Some("created")
+                && change
+                    .get("objectType")
+                    .and_then(Value::as_str)
+                    .map(|object_type| object_type.contains(object_type_suffix))
+                    .unwrap_or(false)
+        })
+        .and_then(|change| change.get("objectId").and_then(Value::as_str))
+        .map(ToString::to_string)
 }
 
 fn default_rpc_url(network: &str) -> &'static str {
