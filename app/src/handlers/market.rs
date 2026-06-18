@@ -90,6 +90,14 @@ pub async fn create_receipt_listing(
         Uuid::parse_str(&req.opponent_id).map_err(|_| bad_request("Invalid opponent_id"))?;
     let match_with_odds = load_match(&state, &req.match_id).await?;
     validate_listing_target(&match_with_odds, opponent_uuid)?;
+    if state
+        .db
+        .has_open_receipt_listing(&receipt_id)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?
+    {
+        return Err(bad_request("receipt already has an open listing"));
+    }
 
     let expires_at = req
         .expires_at
@@ -610,9 +618,41 @@ fn build_listing_response_data(
         .iter()
         .find(|opponent| opponent.opponent.id == listing.opponent_id)
         .ok_or_else(|| bad_request("Opponent not found for this tournament"))?;
+    let id = listing.id;
+    let network = listing.network.clone();
+    let wallet_address = listing.seller_wallet.clone();
+    let seller_wallet = listing.seller_wallet.clone();
+    let buyer_wallet = listing.buyer_wallet.clone();
+    let receipt_id = listing.receipt_id.clone();
+    let listing_object_id = listing.listing_object_id.clone();
+    let match_id = listing.match_id;
+    let opponent_id = listing.opponent_id;
+    let ask_amount_usdc = listing.ask_amount_usdc;
+    let status = listing.status.clone();
+    let listing_tx_hash = listing.listing_tx_hash.clone();
+    let sale_tx_hash = listing.sale_tx_hash.clone();
+    let expires_at = listing.expires_at;
+    let created_at = listing.created_at;
+    let updated_at = listing.updated_at;
 
     Ok(ReceiptListingResponse {
         listing,
+        id,
+        network,
+        wallet_address,
+        seller_wallet,
+        buyer_wallet,
+        receipt_id,
+        listing_object_id,
+        match_id,
+        opponent_id,
+        ask_amount_usdc,
+        status,
+        listing_tx_hash,
+        sale_tx_hash,
+        expires_at,
+        created_at,
+        updated_at,
         match_name: match_with_odds.match_info.name.clone(),
         opponent_name: opponent.opponent.name.clone(),
     })

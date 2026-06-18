@@ -188,6 +188,7 @@ Display:
 
 - Available balance: `available_balance_usdc`.
 - Locked in Kombats: `locked_in_kombats_usdc`.
+- Live tournament stakes: `/api/home/:wallet` includes `active_stakes` alongside `live_kombats`.
 - History rows: `transaction_history`.
 - Fund button: call Dynamic Native Onramp through `/api/ramps/session`.
 - Withdraw button: currently should be hidden/disabled unless backend returns `actions.withdraw.enabled`.
@@ -491,6 +492,8 @@ Authorization: Bearer <appAccessToken>
 ```
 
 The response uses the same generic PTB plan shape as wagers and payment intents: `can_build`, optional `reason`, `coin_type`, `package_id`, `steps`, and `move_call`. `move_call.function` is `list_receipt`.
+
+Receipt listing responses include the canonical nested shape `{ listing, match_name, opponent_name }` and top-level aliases for common listing fields such as `id`, `wallet_address`, `seller_wallet`, `receipt_id`, `match_id`, `opponent_id`, `ask_amount_usdc`, and `status`.
 
 After successful on-chain listing, activate the backend record:
 
