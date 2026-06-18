@@ -2438,6 +2438,50 @@ impl DbService {
         Ok(row)
     }
 
+    pub async fn record_indexed_pool_stake(
+        &self,
+        match_id: uuid::Uuid,
+        opponent_id: uuid::Uuid,
+        user_wallet: &str,
+        amount_usdc: i64,
+        odds_at_stake: Option<rust_decimal::Decimal>,
+        stake_tx_hash: &str,
+        stake_receipt_id: &str,
+    ) -> Result<(crate::models::PoolStakeRecord, bool)> {
+        if let Some(existing) = sqlx::query_as::<_, crate::models::PoolStakeRecord>(
+            r#"SELECT *
+               FROM pool_stakes
+               WHERE stake_tx_hash = $1 OR stake_receipt_id = $2
+               LIMIT 1"#,
+        )
+        .bind(stake_tx_hash)
+        .bind(stake_receipt_id)
+        .fetch_optional(&self.pool)
+        .await?
+        {
+            return Ok((existing, false));
+        }
+
+        let row = sqlx::query_as::<_, crate::models::PoolStakeRecord>(
+            r#"INSERT INTO pool_stakes (
+                match_id, opponent_id, user_wallet, amount_usdc, odds_at_stake,
+                status, stake_tx_hash, stake_receipt_id
+            ) VALUES ($1, $2, $3, $4, $5, 'active', $6, $7)
+            RETURNING *"#,
+        )
+        .bind(match_id)
+        .bind(opponent_id)
+        .bind(user_wallet)
+        .bind(amount_usdc)
+        .bind(odds_at_stake)
+        .bind(stake_tx_hash)
+        .bind(stake_receipt_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok((row, true))
+    }
+
     /// Calculate potential payout for a stake
     pub async fn calculate_payout(
         &self,
