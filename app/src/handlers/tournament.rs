@@ -4,6 +4,7 @@ use axum::{
     Json,
 };
 use chrono::{Duration, Utc};
+use rust_decimal::Decimal;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -79,11 +80,12 @@ pub async fn list_tournaments(
     State(state): State<Arc<AppState>>,
     Query(query): Query<MatchListQuery>,
 ) -> AppResult<Vec<MatchWithOdds>> {
-    let matches = state
+    let mut matches = state
         .db
         .list_matches(&query)
         .await
         .map_err(|e| internal_error(e.to_string()))?;
+    hydrate_matches_from_chain(&state, &mut matches).await;
 
     Ok(Json(ApiResponse::ok(matches)))
 }
@@ -278,12 +280,13 @@ pub async fn get_tournament(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> AppResult<MatchWithOdds> {
-    let match_with_odds = state
+    let mut match_with_odds = state
         .db
         .get_match_with_odds(&id)
         .await
         .map_err(|e| internal_error(e.to_string()))?
         .ok_or_else(|| not_found("Tournament not found"))?;
+    hydrate_match_from_chain(&state, &mut match_with_odds).await;
 
     Ok(Json(ApiResponse::ok(match_with_odds)))
 }
@@ -458,6 +461,138 @@ pub async fn backfill_tournament_pools(
     })))
 }
 
+pub async fn sync_tournament_stakes(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(req): Json<SyncMatchStakesRequest>,
+) -> AppResult<SyncMatchStakesResponse> {
+    verify_admin(&headers)?;
+
+    let mut match_with_odds = state
+        .db
+        .get_match_with_odds(&id)
+        .await
+        .map_err(|e| internal_error(e.to_string()))?
+        .ok_or_else(|| not_found("Tournament not found"))?;
+    let pool_object_id = match_with_odds
+        .match_info
+        .sui_pool_object_id
+        .clone()
+        .ok_or_else(|| bad_request("Tournament pool is not configured"))?;
+    let network = req
+        .sui_network
+        .or_else(|| match_with_odds.match_info.sui_network.clone())
+        .unwrap_or_else(|| state.sui.config().active_network.clone());
+    let network_config = state
+        .sui
+        .config()
+        .network(&network)
+        .ok_or_else(|| bad_request("Unsupported Sui network"))?;
+    let network = network_config.network.clone();
+
+    let events = state
+        .sui
+        .stake_events_for_pool(&network, &pool_object_id, req.limit.unwrap_or(50))
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+
+    let mut entries = Vec::with_capacity(events.len());
+    let mut indexed = 0usize;
+    let mut skipped = 0usize;
+
+    for event in events
+        .into_iter()
+        .filter(|event| event.match_id == match_with_odds.match_info.id.to_string())
+    {
+        let opponent = match_with_odds
+            .opponents
+            .iter()
+            .find(|opponent| opponent.opponent.position + 1 == event.outcome as i16);
+        let Some(opponent) = opponent else {
+            skipped += 1;
+            entries.push(SyncMatchStakeEntry {
+                tx_digest: event.tx_digest,
+                receipt_id: event.receipt_id,
+                owner: event.owner,
+                opponent_id: None,
+                outcome: event.outcome,
+                amount_usdc: event.amount,
+                indexed: false,
+                reason: Some("opponent_not_found_for_outcome".to_string()),
+            });
+            continue;
+        };
+
+        let odds = event_odds(&event);
+        match state
+            .db
+            .record_indexed_pool_stake(
+                match_with_odds.match_info.id,
+                opponent.opponent.id,
+                &event.owner,
+                event.amount,
+                odds,
+                &event.tx_digest,
+                &event.receipt_id,
+            )
+            .await
+        {
+            Ok((_, true)) => {
+                indexed += 1;
+                entries.push(SyncMatchStakeEntry {
+                    tx_digest: event.tx_digest,
+                    receipt_id: event.receipt_id,
+                    owner: event.owner,
+                    opponent_id: Some(opponent.opponent.id),
+                    outcome: event.outcome,
+                    amount_usdc: event.amount,
+                    indexed: true,
+                    reason: None,
+                });
+            }
+            Ok((_, false)) => {
+                skipped += 1;
+                entries.push(SyncMatchStakeEntry {
+                    tx_digest: event.tx_digest,
+                    receipt_id: event.receipt_id,
+                    owner: event.owner,
+                    opponent_id: Some(opponent.opponent.id),
+                    outcome: event.outcome,
+                    amount_usdc: event.amount,
+                    indexed: false,
+                    reason: Some("already_indexed".to_string()),
+                });
+            }
+            Err(e) => {
+                skipped += 1;
+                entries.push(SyncMatchStakeEntry {
+                    tx_digest: event.tx_digest,
+                    receipt_id: event.receipt_id,
+                    owner: event.owner,
+                    opponent_id: Some(opponent.opponent.id),
+                    outcome: event.outcome,
+                    amount_usdc: event.amount,
+                    indexed: false,
+                    reason: Some(e.to_string()),
+                });
+            }
+        }
+    }
+
+    hydrate_match_from_chain(&state, &mut match_with_odds).await;
+
+    Ok(Json(ApiResponse::ok(SyncMatchStakesResponse {
+        match_id: match_with_odds.match_info.id,
+        network,
+        pool_object_id,
+        seen: entries.len(),
+        indexed,
+        skipped,
+        entries,
+    })))
+}
+
 fn pool_stake_deadline_ms(match_record: &MatchRecord, default_stake_window_hours: i64) -> u64 {
     let now = Utc::now();
     let deadline = [
@@ -471,6 +606,76 @@ fn pool_stake_deadline_ms(match_record: &MatchRecord, default_stake_window_hours
     .unwrap_or_else(|| now + Duration::hours(default_stake_window_hours));
 
     deadline.timestamp_millis().max(0) as u64
+}
+
+async fn hydrate_matches_from_chain(state: &Arc<AppState>, matches: &mut [MatchWithOdds]) {
+    for match_with_odds in matches {
+        hydrate_match_from_chain(state, match_with_odds).await;
+    }
+}
+
+async fn hydrate_match_from_chain(state: &Arc<AppState>, match_with_odds: &mut MatchWithOdds) {
+    let Some(pool_object_id) = match_with_odds.match_info.sui_pool_object_id.as_deref() else {
+        return;
+    };
+    let network = match_with_odds
+        .match_info
+        .sui_network
+        .as_deref()
+        .unwrap_or_else(|| state.sui.config().active_network.as_str());
+
+    let snapshot = match state
+        .sui
+        .tournament_pool_snapshot(network, pool_object_id)
+        .await
+    {
+        Ok(snapshot) => snapshot,
+        Err(e) => {
+            tracing::warn!(
+                match_id = %match_with_odds.match_info.id,
+                pool_object_id,
+                error = %e,
+                "failed to hydrate tournament pool totals from Sui"
+            );
+            return;
+        }
+    };
+
+    let total_pool = snapshot.total_a + snapshot.total_b;
+    match_with_odds.total_pool_usdc = total_pool;
+    for opponent in &mut match_with_odds.opponents {
+        let pool_usdc = match opponent.opponent.position {
+            0 => snapshot.total_a,
+            1 => snapshot.total_b,
+            _ => opponent.pool_usdc,
+        };
+        opponent.pool_usdc = pool_usdc;
+        opponent.pool_percentage = if total_pool > 0 {
+            (pool_usdc as f64 / total_pool as f64) * 100.0
+        } else {
+            50.0
+        };
+        opponent.odds = if pool_usdc > 0 {
+            (total_pool as f64 / pool_usdc as f64).min(9999.0)
+        } else if total_pool > 0 {
+            9999.0
+        } else {
+            1.0
+        };
+    }
+}
+
+fn event_odds(event: &crate::services::sui::StakePlacedEvent) -> Option<Decimal> {
+    let total = event.total_a + event.total_b;
+    let side_total = match event.outcome {
+        1 => event.total_a,
+        2 => event.total_b,
+        _ => 0,
+    };
+    if total <= 0 || side_total <= 0 {
+        return Decimal::from_f64_retain(1.0);
+    }
+    Decimal::from_f64_retain((total as f64 / side_total as f64).min(9999.0))
 }
 
 pub async fn create_organizer_tournament(

@@ -669,6 +669,35 @@ pub struct MatchPoolBackfillResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SyncMatchStakesRequest {
+    pub sui_network: Option<String>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncMatchStakeEntry {
+    pub tx_digest: String,
+    pub receipt_id: String,
+    pub owner: String,
+    pub opponent_id: Option<Uuid>,
+    pub outcome: u8,
+    pub amount_usdc: i64,
+    pub indexed: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SyncMatchStakesResponse {
+    pub match_id: Uuid,
+    pub network: String,
+    pub pool_object_id: String,
+    pub seen: usize,
+    pub indexed: usize,
+    pub skipped: usize,
+    pub entries: Vec<SyncMatchStakeEntry>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateOrganizerTournamentRequest {
     pub organizer_wallet: String,
     pub name: String,

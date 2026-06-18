@@ -102,6 +102,29 @@ pub struct CreatedTournamentPool {
     pub pool_object_id: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct TournamentPoolSnapshot {
+    pub object_type: String,
+    pub original_package_id: String,
+    pub total_a: i64,
+    pub total_b: i64,
+    pub vault: i64,
+    pub status: u8,
+}
+
+#[derive(Debug, Clone)]
+pub struct StakePlacedEvent {
+    pub tx_digest: String,
+    pub owner: String,
+    pub match_id: String,
+    pub pool_id: String,
+    pub receipt_id: String,
+    pub outcome: u8,
+    pub amount: i64,
+    pub total_a: i64,
+    pub total_b: i64,
+}
+
 impl SuiService {
     pub fn new(config: SuiConfig) -> Self {
         Self {
@@ -220,6 +243,63 @@ impl SuiService {
             digest: executed.digest,
             pool_object_id,
         })
+    }
+
+    pub async fn tournament_pool_snapshot(
+        &self,
+        network: &str,
+        pool_object_id: &str,
+    ) -> anyhow::Result<TournamentPoolSnapshot> {
+        let value: Value = self
+            .rpc(
+                network,
+                "sui_getObject",
+                json!([
+                    pool_object_id,
+                    { "showContent": true, "showType": true, "showOwner": true }
+                ]),
+            )
+            .await?;
+
+        parse_pool_snapshot(&value)
+    }
+
+    pub async fn stake_events_for_pool(
+        &self,
+        network: &str,
+        pool_object_id: &str,
+        limit: usize,
+    ) -> anyhow::Result<Vec<StakePlacedEvent>> {
+        let snapshot = self
+            .tournament_pool_snapshot(network, pool_object_id)
+            .await?;
+        let event_type = format!(
+            "{}::tournament_staking::StakePlaced",
+            snapshot.original_package_id
+        );
+        let value: Value = self
+            .rpc(
+                network,
+                "suix_queryEvents",
+                json!([
+                    { "MoveEventType": event_type },
+                    Value::Null,
+                    limit.clamp(1, 100),
+                    true
+                ]),
+            )
+            .await?;
+
+        let events = value
+            .get("data")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(parse_stake_placed_event)
+            .filter(|event| event.pool_id.eq_ignore_ascii_case(pool_object_id))
+            .collect();
+
+        Ok(events)
     }
 
     pub fn platform_signer_address() -> Option<String> {
@@ -415,6 +495,62 @@ fn find_created_object(response: &Value, object_type_suffix: &str) -> Option<Str
         })
         .and_then(|change| change.get("objectId").and_then(Value::as_str))
         .map(ToString::to_string)
+}
+
+fn parse_pool_snapshot(value: &Value) -> anyhow::Result<TournamentPoolSnapshot> {
+    let object_type = value
+        .pointer("/data/type")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("pool object response had no type: {}", value))?
+        .to_string();
+    let original_package_id = object_type
+        .split("::")
+        .next()
+        .ok_or_else(|| anyhow!("pool object type is invalid: {}", object_type))?
+        .to_string();
+    let fields = value
+        .pointer("/data/content/fields")
+        .ok_or_else(|| anyhow!("pool object response had no fields: {}", value))?;
+
+    Ok(TournamentPoolSnapshot {
+        object_type,
+        original_package_id,
+        total_a: json_i64(fields, "total_a")?,
+        total_b: json_i64(fields, "total_b")?,
+        vault: json_i64(fields, "vault")?,
+        status: json_i64(fields, "status")? as u8,
+    })
+}
+
+fn parse_stake_placed_event(value: &Value) -> Option<StakePlacedEvent> {
+    let parsed = value.get("parsedJson")?;
+    Some(StakePlacedEvent {
+        tx_digest: value
+            .pointer("/id/txDigest")
+            .and_then(Value::as_str)?
+            .to_string(),
+        owner: parsed.get("owner")?.as_str()?.to_string(),
+        match_id: parsed.get("match_id")?.as_str()?.to_string(),
+        pool_id: parsed.get("pool_id")?.as_str()?.to_string(),
+        receipt_id: parsed.get("receipt_id")?.as_str()?.to_string(),
+        outcome: json_i64(parsed, "outcome").ok()? as u8,
+        amount: json_i64(parsed, "amount").ok()?,
+        total_a: json_i64(parsed, "total_a").ok()?,
+        total_b: json_i64(parsed, "total_b").ok()?,
+    })
+}
+
+fn json_i64(value: &Value, key: &str) -> anyhow::Result<i64> {
+    let raw = value
+        .get(key)
+        .ok_or_else(|| anyhow!("missing numeric field {}", key))?;
+    if let Some(n) = raw.as_i64() {
+        return Ok(n);
+    }
+    raw.as_str()
+        .ok_or_else(|| anyhow!("field {} is not numeric: {}", key, raw))?
+        .parse::<i64>()
+        .map_err(|e| anyhow!("field {} is invalid: {}", key, e))
 }
 
 fn default_rpc_url(network: &str) -> &'static str {
