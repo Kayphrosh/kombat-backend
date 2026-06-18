@@ -8,8 +8,8 @@ use std::sync::Arc;
 
 use crate::{
     models::{
-        ApiResponse, HomeSummaryResponse, NotificationSettings, UpdateNotificationSettings,
-        UpdateProfileRequest, UserRecord, UserSearchQuery, UserStats,
+        ApiResponse, HomeSummaryResponse, NotificationSettings, StakeListQuery,
+        UpdateNotificationSettings, UpdateProfileRequest, UserRecord, UserSearchQuery, UserStats,
     },
     services::{auth::verify_jwt_get_wallet, sui::SuiService},
     state::AppState,
@@ -214,6 +214,19 @@ pub async fn get_home_summary(
         .list_my_wagers(&wallet_address, Some(100), Some(0))
         .await
         .map_err(|e| internal_error(e.to_string()))?;
+    let active_stakes = state
+        .db
+        .get_user_stakes(
+            &wallet_address,
+            &StakeListQuery {
+                status: Some("active".to_string()),
+                match_id: None,
+                limit: Some(20),
+                offset: Some(0),
+            },
+        )
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
 
     let (history_kombats, live_kombats): (Vec<_>, Vec<_>) = wagers
         .into_iter()
@@ -223,6 +236,7 @@ pub async fn get_home_summary(
         stats,
         live_kombats,
         history_kombats,
+        active_stakes,
     })))
 }
 

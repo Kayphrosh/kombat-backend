@@ -2297,6 +2297,22 @@ impl DbService {
         Ok(rows)
     }
 
+    pub async fn has_open_receipt_listing(&self, receipt_id: &str) -> Result<bool> {
+        let exists: bool = sqlx::query_scalar(
+            r#"SELECT EXISTS (
+                SELECT 1
+                FROM receipt_market_listings
+                WHERE receipt_id = $1
+                  AND status IN ('draft', 'active')
+            )"#,
+        )
+        .bind(receipt_id)
+        .fetch_one(&self.pool)
+        .await?;
+
+        Ok(exists)
+    }
+
     pub async fn activate_receipt_listing(
         &self,
         listing_id: uuid::Uuid,
@@ -2837,12 +2853,23 @@ impl DbService {
             JOIN matches m ON m.id = ps.match_id
             JOIN match_opponents mo ON mo.id = ps.opponent_id
             WHERE ps.user_wallet = $1
+              AND ($4::text IS NULL OR ps.status = $4)
+              AND ($5::uuid IS NULL OR ps.match_id = $5)
             ORDER BY ps.created_at DESC
             LIMIT $2 OFFSET $3"#,
         )
         .bind(wallet)
         .bind(limit)
         .bind(offset)
+        .bind(query.status.as_deref())
+        .bind(
+            query
+                .match_id
+                .as_deref()
+                .map(uuid::Uuid::parse_str)
+                .transpose()
+                .map_err(|e| anyhow::anyhow!("Invalid match_id: {}", e))?,
+        )
         .fetch_all(&self.pool)
         .await?;
 

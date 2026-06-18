@@ -301,12 +301,13 @@ pub struct UserStats {
     pub total_won: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize)]
 pub struct HomeSummaryResponse {
     #[serde(flatten)]
     pub stats: UserStats,
     pub live_kombats: Vec<WagerDetailResponse>,
     pub history_kombats: Vec<WagerDetailResponse>,
+    pub active_stakes: Vec<StakeWithMatch>,
 }
 
 // ─── Notification Settings ───────────────────────────────────────────────────
@@ -1338,6 +1339,22 @@ pub struct MarkReceiptListingSoldRequest {
 #[derive(Debug, Serialize)]
 pub struct ReceiptListingResponse {
     pub listing: ReceiptMarketListingRecord,
+    pub id: Uuid,
+    pub network: String,
+    pub wallet_address: String,
+    pub seller_wallet: String,
+    pub buyer_wallet: Option<String>,
+    pub receipt_id: String,
+    pub listing_object_id: Option<String>,
+    pub match_id: Uuid,
+    pub opponent_id: Uuid,
+    pub ask_amount_usdc: i64,
+    pub status: String,
+    pub listing_tx_hash: Option<String>,
+    pub sale_tx_hash: Option<String>,
+    pub expires_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
     pub match_name: String,
     pub opponent_name: String,
 }
