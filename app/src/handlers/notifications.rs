@@ -31,6 +31,15 @@ fn internal_error(
     )
 }
 
+fn gateway_timeout(
+    msg: impl Into<String>,
+) -> (axum::http::StatusCode, Json<crate::models::ApiResponse<()>>) {
+    (
+        axum::http::StatusCode::GATEWAY_TIMEOUT,
+        Json(crate::models::ApiResponse::err(msg)),
+    )
+}
+
 fn unauthorized(
     msg: impl Into<String>,
 ) -> (axum::http::StatusCode, Json<crate::models::ApiResponse<()>>) {
@@ -81,14 +90,21 @@ pub async fn list_notifications(
         return Err(unauthorized("wallet in token does not match request"));
     }
 
-    let limit = query.limit.unwrap_or(50).min(200);
-    let offset = query.offset.unwrap_or(0);
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let offset = query.offset.unwrap_or(0).max(0);
 
     let rows = state
         .db
         .list_notifications_for_user(&requested_wallet, limit, offset)
         .await
-        .map_err(|e| internal_error(e.to_string()))?;
+        .map_err(|e| {
+            let message = e.to_string();
+            if message.contains("timed out listing notifications") {
+                gateway_timeout("notifications query timed out")
+            } else {
+                internal_error(message)
+            }
+        })?;
 
     Ok(Json(crate::models::ApiResponse::ok(rows)))
 }

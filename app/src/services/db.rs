@@ -1,9 +1,10 @@
 use crate::models::{
     NotificationRecord, UpdateProfileRequest, UserRecord, WagerListQuery, WagerRecord,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde_json::Value as JsonValue;
 use sqlx::{postgres::PgPoolOptions, PgPool};
+use std::time::Duration;
 
 #[derive(sqlx::FromRow)]
 struct WagerWithUsersRow {
@@ -76,9 +77,44 @@ impl DbService {
             .max_connections(20)
             .connect(database_url)
             .await?;
+        Self::ensure_notification_schema(&pool).await?;
         Self::ensure_wager_resolution_columns(&pool).await?;
         Self::ensure_user_email_column(&pool).await?;
         Ok(Self { pool })
+    }
+
+    async fn ensure_notification_schema(pool: &PgPool) -> Result<()> {
+        let user_wallet_type: Option<String> = sqlx::query_scalar(
+            r#"
+            SELECT data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = 'notifications'
+              AND column_name = 'user_wallet'
+            "#,
+        )
+        .fetch_optional(pool)
+        .await
+        .context("failed to inspect notifications.user_wallet type")?;
+
+        if user_wallet_type.as_deref() != Some("text") {
+            sqlx::query("ALTER TABLE notifications ALTER COLUMN user_wallet TYPE TEXT")
+                .execute(pool)
+                .await
+                .context("failed to widen notifications.user_wallet")?;
+        }
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_notifications_user_created_at
+                ON notifications (user_wallet, created_at DESC)
+            "#,
+        )
+        .execute(pool)
+        .await
+        .context("failed to ensure notifications user/created_at index")?;
+
+        Ok(())
     }
 
     async fn ensure_wager_resolution_columns(pool: &PgPool) -> Result<()> {
@@ -135,14 +171,18 @@ impl DbService {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<NotificationRecord>> {
-        let rows = sqlx::query_as::<_, NotificationRecord>(
-            "SELECT id, user_wallet, kind, payload, is_read, created_at FROM notifications WHERE user_wallet = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+        let rows = tokio::time::timeout(
+            Duration::from_secs(5),
+            sqlx::query_as::<_, NotificationRecord>(
+                "SELECT id, user_wallet, kind, payload, is_read, created_at FROM notifications WHERE user_wallet = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3"
+            )
+            .bind(wallet)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool),
         )
-        .bind(wallet)
-        .bind(limit)
-        .bind(offset)
-        .fetch_all(&self.pool)
-        .await?;
+        .await
+        .context("timed out listing notifications")??;
         Ok(rows)
     }
 
