@@ -570,7 +570,7 @@ impl OpponentWithPoolRow {
 
 // ─── API Request Types ───────────────────────────────────────────────────────
 
-/// Create/sync a match from PandaScore data (frontend pushes this)
+/// Create/sync a match from PandaScore-shaped data for admin backfills.
 #[derive(Debug, Deserialize)]
 pub struct CreateMatchRequest {
     pub pandascore_id: i64,
@@ -622,6 +622,9 @@ pub struct CreateMatchRequest {
     // On-chain pool metadata, populated by the indexer after create_pool.
     pub sui_network: Option<String>,
     pub sui_pool_object_id: Option<String>,
+
+    // Data provider. New provider syncs should set this to `grid`.
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -994,9 +997,11 @@ pub enum ResolveResult {
 
 #[derive(Debug, Deserialize)]
 pub struct MatchListQuery {
-    pub status: Option<String>,    // upcoming, live, completed, cancelled
+    pub status: Option<String>,    // defaults to current feed: upcoming + live
     pub videogame: Option<String>, // Filter by videogame slug
     pub league_id: Option<i32>,
+    pub tournament_id: Option<i32>,
+    pub tournament_slug: Option<String>,
     pub pool_configured: Option<bool>,
     pub search: Option<String>, // Search in name
     pub limit: Option<i64>,
@@ -1016,6 +1021,7 @@ pub struct PandaScoreSyncResponse {
     pub provider: String,
     pub fetched: usize,
     pub synced: usize,
+    pub synced_incomplete: usize,
     pub skipped: usize,
     pub resolved: usize,
     pub errors: Vec<String>,
@@ -1030,6 +1036,42 @@ pub struct PandaScoreSourceResponse {
     pub default_statuses: Vec<String>,
     pub default_videogame_slugs: Vec<String>,
     pub default_per_page: u32,
+    pub default_max_pages: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GridSyncRequest {
+    pub statuses: Option<Vec<String>>,
+    pub videogame_slugs: Option<Vec<String>>,
+    pub tournament_id: Option<String>,
+    pub tournament_slug: Option<String>,
+    pub max_pages: Option<u32>,
+    pub per_page: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GridSyncResponse {
+    pub provider: String,
+    pub fetched: usize,
+    pub synced: usize,
+    pub synced_incomplete: usize,
+    pub skipped: usize,
+    pub resolved: usize,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GridSourceResponse {
+    pub provider: String,
+    pub enabled: bool,
+    pub configured: bool,
+    pub base_url: String,
+    pub matches_path: String,
+    pub auth_header: String,
+    pub default_statuses: Vec<String>,
+    pub default_videogame_slugs: Vec<String>,
+    pub default_per_page: u32,
+    pub default_max_pages: u32,
 }
 
 #[derive(Debug, Deserialize)]
