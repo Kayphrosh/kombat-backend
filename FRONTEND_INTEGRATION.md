@@ -263,7 +263,9 @@ List and filter tournaments:
 
 ```http
 GET /api/tournaments
+GET /api/tournaments
 GET /api/tournaments?status=upcoming&videogame=codm&pool_configured=true&search=final&limit=20&offset=0
+GET /api/tournaments?tournament_id=12345&status=all&limit=100
 GET /api/tournaments?tournament_id=12345&status=all&limit=100
 GET /api/tournaments/:id
 ```
@@ -285,8 +287,10 @@ The `MatchWithOdds` response contains:
 Only show on-chain stake entry points for matches where `pool_configured === true`.
 
 GRID source metadata:
+GRID source metadata:
 
 ```http
+GET /api/tournaments/source/grid
 GET /api/tournaments/source/grid
 ```
 
@@ -996,21 +1000,15 @@ POST /api/outcome-proposals/:id/review
 GRID sync:
 
 ```http
-POST /api/tournaments/source/grid/probe
-POST /api/tournaments/source/grid/sync
+POST /api/tournaments/source/pandascore/sync
 X-Admin-Token: <server-only>
 {
-  "statuses": [],
-  "videogame_slugs": ["valorant", "lol", "csgo", "dota2"],
-  "tournament_id": "optional-grid-tournament-id",
-  "tournament_slug": "optional-grid-tournament-slug",
-  "graphql_query": "optional GRID GraphQL match query from the portal",
-  "max_pages": 3,
-  "per_page": 100
+  "statuses": ["not_started", "running", "finished"],
+  "videogame_slugs": ["valorant", "codm"],
+  "max_pages": 2,
+  "per_page": 50
 }
 ```
-
-Probe before syncing. Leave `statuses` empty until the GRID account's exact status values are confirmed. The sync stores incomplete matches too, so `synced_incomplete` means the match is visible for schedule/bracket context but does not yet have exactly two known opponents for staking.
 
 Resolve/cancel/sync:
 
@@ -1097,7 +1095,7 @@ Provider sync/backfill payloads may also include `sui_network` and `sui_pool_obj
 
 ## 20. Security Checklist For FE
 
-- Never expose `AUTH_ADMIN_TOKEN`, `AGENT_API_TOKEN`, `WEBHOOK_SECRET`, `GRID_API_KEY`, private Sui keys, or database URLs.
+- Never expose `AUTH_ADMIN_TOKEN`, `AGENT_API_TOKEN`, `WEBHOOK_SECRET`, `PANDASCORE_API_KEY`, private Sui keys, or database URLs.
 - Always compare authenticated wallet with the connected Dynamic wallet before rendering protected user actions.
 - Only call user-protected routes with the app JWT from `/api/auth/verify`.
 - Do not let users submit arbitrary `owner_wallet` on Walrus uploads unless it matches the connected wallet.
