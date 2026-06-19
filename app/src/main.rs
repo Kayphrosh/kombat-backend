@@ -47,9 +47,10 @@ use handlers::sui::{
 use handlers::tournament::{
     backfill_tournament_pools, calculate_payout, cancel_tournament, configure_tournament_pool,
     create_organizer_match, create_organizer_tournament, create_outcome_proposal,
-    create_tournament, get_tournament, get_tournament_source_pandascore, get_user_stake_stats,
-    get_user_stakes, list_organizer_tournaments, list_outcome_proposals, list_tournament_stakes,
-    list_tournaments, place_stake, resolve_tournament, review_outcome_proposal,
+    create_tournament, get_tournament, get_tournament_source_grid,
+    get_tournament_source_pandascore, get_user_stake_stats, get_user_stakes,
+    list_organizer_tournaments, list_outcome_proposals, list_tournament_stakes, list_tournaments,
+    place_stake, resolve_tournament, review_outcome_proposal, sync_grid_tournaments,
     sync_pandascore_tournaments, sync_tournament, sync_tournament_stakes,
 };
 use handlers::transak::{create_transak_widget_url, get_transak_config, get_transak_quote};
@@ -70,8 +71,8 @@ use handlers::walrus::{
 use handlers::webhook::{handle_match_result_webhook, handle_pandascore_webhook};
 use prometheus::{Encoder, IntCounter, TextEncoder};
 use services::{
-    DbService, PandaScoreConfig, PandaScoreService, RampConfig, RampService, SuiConfig, SuiService,
-    TransakConfig, TransakService, WalrusConfig, WalrusService,
+    DbService, GridConfig, GridService, PandaScoreConfig, PandaScoreService, RampConfig,
+    RampService, SuiConfig, SuiService, TransakConfig, TransakService, WalrusConfig, WalrusService,
 };
 use state::AppState;
 
@@ -128,6 +129,16 @@ async fn main() -> anyhow::Result<()> {
         transak_config.referrer_domain
     );
     let transak = Arc::new(TransakService::new(transak_config));
+
+    let grid_config = GridConfig::from_env();
+    tracing::info!(
+        "Configuring GRID: enabled={}, configured={}, base_url={}, matches_path={}",
+        grid_config.enabled,
+        grid_config.configured(),
+        grid_config.base_url,
+        grid_config.matches_path
+    );
+    let grid = Arc::new(GridService::new(grid_config));
 
     let pandascore_config = PandaScoreConfig::from_env();
     tracing::info!(
@@ -192,6 +203,7 @@ async fn main() -> anyhow::Result<()> {
         sui,
         ramp,
         transak,
+        grid,
         pandascore,
         walrus,
         notif_tx: Arc::new(notif_tx),
@@ -371,6 +383,14 @@ async fn main() -> anyhow::Result<()> {
             "/api/tournaments/source/pandascore/sync",
             post(sync_pandascore_tournaments),
         )
+        .route(
+            "/api/tournaments/source/grid",
+            get(get_tournament_source_grid),
+        )
+        .route(
+            "/api/tournaments/source/grid/sync",
+            post(sync_grid_tournaments),
+        )
         .route("/api/tournaments/:id", get(get_tournament))
         .route(
             "/api/admin/tournaments/:id/pool",
@@ -470,10 +490,17 @@ async fn health_handler(
     let sui = state.sui.config();
     let ramp = state.ramp.config();
     let transak = state.transak.config();
+    let grid = state.grid.config();
     axum::Json(serde_json::json!({
         "status": "ok",
         "service": "wager-api",
         "version": env!("CARGO_PKG_VERSION"),
+        "grid": {
+            "enabled": grid.enabled,
+            "configured": grid.configured(),
+            "base_url": grid.base_url.clone(),
+            "matches_path": grid.matches_path.clone(),
+        },
         "sui": {
             "active_network": sui.active_network.clone(),
             "networks": sui.networks.clone(),

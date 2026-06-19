@@ -12,6 +12,7 @@ pub struct PandaScoreConfig {
     pub default_statuses: Vec<String>,
     pub default_videogame_slugs: Vec<String>,
     pub default_per_page: u32,
+    pub default_max_pages: u32,
 }
 
 impl PandaScoreConfig {
@@ -24,19 +25,19 @@ impl PandaScoreConfig {
             .unwrap_or_else(|_| "https://api.pandascore.co".to_string())
             .trim_end_matches('/')
             .to_string();
-        let default_statuses = env_csv("PANDASCORE_DEFAULT_STATUSES").unwrap_or_else(|| {
-            vec![
-                "upcoming".to_string(),
-                "running".to_string(),
-                "past".to_string(),
-            ]
-        });
+        let default_statuses = env_csv("PANDASCORE_DEFAULT_STATUSES")
+            .unwrap_or_else(|| vec!["upcoming".to_string(), "running".to_string()]);
         let default_videogame_slugs = env_csv("PANDASCORE_VIDEOGAME_SLUGS").unwrap_or_default();
         let default_per_page = std::env::var("PANDASCORE_PER_PAGE")
             .ok()
             .and_then(|value| value.parse::<u32>().ok())
-            .unwrap_or(50)
+            .unwrap_or(100)
             .clamp(1, 100);
+        let default_max_pages = std::env::var("PANDASCORE_MAX_PAGES")
+            .ok()
+            .and_then(|value| value.parse::<u32>().ok())
+            .unwrap_or(3)
+            .clamp(1, 10);
 
         Self {
             enabled,
@@ -45,6 +46,7 @@ impl PandaScoreConfig {
             default_statuses,
             default_videogame_slugs,
             default_per_page,
+            default_max_pages,
         }
     }
 
@@ -92,7 +94,10 @@ impl PandaScoreService {
             .videogame_slugs
             .clone()
             .unwrap_or_else(|| self.config.default_videogame_slugs.clone());
-        let max_pages = req.max_pages.unwrap_or(1).clamp(1, 10);
+        let max_pages = req
+            .max_pages
+            .unwrap_or(self.config.default_max_pages)
+            .clamp(1, 10);
         let per_page = req
             .per_page
             .unwrap_or(self.config.default_per_page)
@@ -261,6 +266,7 @@ fn match_from_value(raw: Value) -> Option<CreateMatchRequest> {
         raw_data: Some(raw),
         sui_network: None,
         sui_pool_object_id: None,
+        source: Some("pandascore".to_string()),
     })
 }
 

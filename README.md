@@ -273,17 +273,22 @@ When `client_action` is `open_dynamic_onramp`, launch Dynamic's native funding U
 Frontend reads tournaments from Kombat:
 
 ```http
+GET /api/tournaments
 GET /api/tournaments?status=upcoming&videogame=codm&limit=20&offset=0
+GET /api/tournaments?tournament_id=12345&status=all&limit=100
 GET /api/tournaments/:id
 ```
 
 Query params:
 
-- `status`: `upcoming`, `live`, `completed`, `cancelled`
+- `status`: defaults to current feed (`upcoming` + `live`); accepts `active` for current feed and `completed`/`finished`/`past` for result history
 - `videogame`: videogame slug
 - `league_id`: PandaScore league id
+- `tournament_id`, `tournament_slug`: PandaScore tournament filters for full tournament/bracket views
 - `search`: match name search
 - `limit`, `offset`
+
+Use `status=all` with `tournament_id`/`tournament_slug` when a screen needs every synced match in a real tournament. Incomplete matches are stored and returned for schedule/bracket context, but they are not stakeable until two opponents and a Sui pool are configured.
 
 Response data is `MatchWithOdds[]` for list and `MatchWithOdds` for detail:
 
@@ -302,13 +307,13 @@ type OpponentWithPool = MatchOpponentRecord & {
 };
 ```
 
-The backend owns PandaScore access and normalizes provider data. The mobile app should not call PandaScore.
+The backend owns GRID access and normalizes provider data. The mobile app should not call GRID.
 
-Admin-only PandaScore sync:
+Admin-only GRID sync:
 
 ```http
-GET /api/tournaments/source/pandascore
-POST /api/tournaments/source/pandascore/sync
+GET /api/tournaments/source/grid
+POST /api/tournaments/source/grid/sync
 X-Admin-Token: <admin-token>
 ```
 
@@ -316,14 +321,18 @@ Optional sync body:
 
 ```json
 {
-  "statuses": ["upcoming", "running", "past"],
-  "videogame_slugs": ["csgo", "dota2", "lol"],
-  "max_pages": 1,
-  "per_page": 50
+  "statuses": ["upcoming", "running"],
+  "videogame_slugs": ["csgo", "dota2", "lol", "valorant"],
+  "tournament_id": "optional-grid-tournament-id",
+  "tournament_slug": "optional-grid-tournament-slug",
+  "max_pages": 3,
+  "per_page": 100
 }
 ```
 
-`POST /api/tournaments` accepts PandaScore-shaped data for admin backfills and local development only. It is protected by the Kombat app JWT and should not be normal app flow.
+Sync stores matches even when both opponents are not known yet; those are counted in `synced_incomplete`.
+
+`POST /api/tournaments` accepts PandaScore-shaped data for admin backfills and local development only. It requires `X-Admin-Token` and should not be normal app flow.
 
 ## Smart Pay Staking
 

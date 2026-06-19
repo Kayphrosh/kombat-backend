@@ -102,6 +102,85 @@ pub async fn get_tournament_source_pandascore(
         default_statuses: config.default_statuses.clone(),
         default_videogame_slugs: config.default_videogame_slugs.clone(),
         default_per_page: config.default_per_page,
+        default_max_pages: config.default_max_pages,
+    })))
+}
+
+pub async fn get_tournament_source_grid(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<GridSourceResponse> {
+    let config = state.grid.config();
+    Ok(Json(ApiResponse::ok(GridSourceResponse {
+        provider: "grid".to_string(),
+        enabled: config.enabled,
+        configured: config.configured(),
+        base_url: config.base_url.clone(),
+        matches_path: config.matches_path.clone(),
+        auth_header: config.auth_header.clone(),
+        default_statuses: config.default_statuses.clone(),
+        default_videogame_slugs: config.default_videogame_slugs.clone(),
+        default_per_page: config.default_per_page,
+        default_max_pages: config.default_max_pages,
+    })))
+}
+
+pub async fn sync_grid_tournaments(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<GridSyncRequest>,
+) -> AppResult<GridSyncResponse> {
+    verify_admin(&headers)?;
+
+    let fetched = state
+        .grid
+        .fetch_matches(&req)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+
+    let mut synced = 0usize;
+    let mut synced_incomplete = 0usize;
+    let skipped = 0usize;
+    let mut resolved = 0usize;
+    let mut errors = Vec::new();
+
+    for match_req in fetched.iter() {
+        let match_record = match state.db.upsert_match(match_req).await {
+            Ok(record) => record,
+            Err(e) => {
+                errors.push(format!(
+                    "failed to sync GRID match {}: {}",
+                    match_req.pandascore_id, e
+                ));
+                continue;
+            }
+        };
+        synced += 1;
+        if match_req.opponents.len() != 2 {
+            synced_incomplete += 1;
+        }
+
+        if match_req.pandascore_status.as_deref() == Some("finished") {
+            match resolve_finished_pandascore_match(&state, &match_record.id.to_string(), match_req)
+                .await
+            {
+                Ok(true) => resolved += 1,
+                Ok(false) => {}
+                Err(e) => errors.push(format!(
+                    "failed to resolve GRID match {}: {}",
+                    match_req.pandascore_id, e
+                )),
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::ok(GridSyncResponse {
+        provider: "grid".to_string(),
+        fetched: fetched.len(),
+        synced,
+        synced_incomplete,
+        skipped,
+        resolved,
+        errors,
     })))
 }
 
@@ -119,16 +198,12 @@ pub async fn sync_pandascore_tournaments(
         .map_err(|e| bad_request(e.to_string()))?;
 
     let mut synced = 0usize;
-    let mut skipped = 0usize;
+    let mut synced_incomplete = 0usize;
+    let skipped = 0usize;
     let mut resolved = 0usize;
     let mut errors = Vec::new();
 
     for match_req in fetched.iter() {
-        if match_req.opponents.len() != 2 {
-            skipped += 1;
-            continue;
-        }
-
         let match_record = match state.db.upsert_match(match_req).await {
             Ok(record) => record,
             Err(e) => {
@@ -140,6 +215,9 @@ pub async fn sync_pandascore_tournaments(
             }
         };
         synced += 1;
+        if match_req.opponents.len() != 2 {
+            synced_incomplete += 1;
+        }
 
         if match_req.pandascore_status.as_deref() == Some("finished") {
             match resolve_finished_pandascore_match(&state, &match_record.id.to_string(), match_req)
@@ -159,6 +237,7 @@ pub async fn sync_pandascore_tournaments(
         provider: "pandascore".to_string(),
         fetched: fetched.len(),
         synced,
+        synced_incomplete,
         skipped,
         resolved,
         errors,
@@ -174,15 +253,13 @@ pub async fn create_tournament(
     headers: HeaderMap,
     Json(mut req): Json<CreateMatchRequest>,
 ) -> AppResult<MatchWithOdds> {
-    // Require authenticated user to prevent spam
-    let _wallet = extract_wallet_from_jwt(&headers)?;
+    verify_admin(&headers)?;
 
     // Validate we have exactly 2 opponents for binary betting
     if req.opponents.len() != 2 {
         return Err(bad_request("Exactly 2 opponents required for betting"));
     }
     if req.sui_pool_object_id.is_some() || req.sui_network.is_some() {
-        verify_admin(&headers)?;
         if let Some(pool_object_id) = req.sui_pool_object_id.as_ref() {
             req.sui_pool_object_id = Some(
                 SuiService::normalize_address(pool_object_id)
@@ -1062,8 +1139,11 @@ pub async fn cancel_tournament(
 pub async fn sync_tournament(
     State(state): State<Arc<AppState>>,
     Path(match_id): Path<String>,
+    headers: HeaderMap,
     Json(req): Json<CreateMatchRequest>,
 ) -> AppResult<MatchWithOdds> {
+    verify_admin(&headers)?;
+
     // Update match data
     let _ = state
         .db

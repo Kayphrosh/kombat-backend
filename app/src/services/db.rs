@@ -979,6 +979,10 @@ impl DbService {
             .pandascore_status
             .clone()
             .unwrap_or_else(|| "not_started".to_string());
+        let source = req
+            .source
+            .clone()
+            .unwrap_or_else(|| "pandascore".to_string());
 
         // Determine our internal status based on PandaScore status
         let status = match pandascore_status.as_str() {
@@ -1001,11 +1005,11 @@ impl DbService {
                 match_type, number_of_games,
                 pandascore_status, status,
                 streams_list, raw_data,
-                sui_network, sui_pool_object_id
+                sui_network, sui_pool_object_id, source
             ) VALUES (
                 $1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
                 $11, $12, $13, $14, $15, $16, $17, $18, $19,
-                $20, $21, $22, $23, $24, $25, $26, $27
+                $20, $21, $22, $23, $24, $25, $26, $27, $28
             )
             ON CONFLICT (pandascore_id) DO UPDATE SET
                 name = EXCLUDED.name,
@@ -1020,6 +1024,7 @@ impl DbService {
                 END,
                 streams_list = EXCLUDED.streams_list,
                 raw_data = EXCLUDED.raw_data,
+                source = EXCLUDED.source,
                 sui_network = COALESCE(EXCLUDED.sui_network, matches.sui_network),
                 sui_pool_object_id = COALESCE(EXCLUDED.sui_pool_object_id, matches.sui_pool_object_id),
                 updated_at = NOW()
@@ -1052,6 +1057,7 @@ impl DbService {
         .bind(&req.raw_data)
         .bind(&req.sui_network)
         .bind(&req.sui_pool_object_id)
+        .bind(&source)
         .fetch_one(&self.pool)
         .await?;
 
@@ -2056,8 +2062,23 @@ impl DbService {
 
         let mut qb = sqlx::QueryBuilder::new("SELECT * FROM matches WHERE 1=1");
 
-        if let Some(ref status) = query.status {
-            qb.push(" AND status = ").push_bind(status.clone());
+        let statuses = match query.status.as_deref().map(str::trim) {
+            None | Some("") => Some(vec!["upcoming".to_string(), "live".to_string()]),
+            Some(status) => match status.to_ascii_lowercase().as_str() {
+                "all" | "any" => None,
+                "active" | "available" | "current" | "open" => {
+                    Some(vec!["upcoming".to_string(), "live".to_string()])
+                }
+                "not_started" | "not-started" | "upcoming" => Some(vec!["upcoming".to_string()]),
+                "running" | "live" => Some(vec!["live".to_string()]),
+                "finished" | "completed" | "past" => Some(vec!["completed".to_string()]),
+                "canceled" | "cancelled" => Some(vec!["cancelled".to_string()]),
+                "refunded" => Some(vec!["refunded".to_string()]),
+                other => Some(vec![other.to_string()]),
+            },
+        };
+        if let Some(statuses) = statuses {
+            qb.push(" AND status = ANY(").push_bind(statuses).push(")");
         }
 
         if let Some(ref vg) = query.videogame {
@@ -2066,6 +2087,15 @@ impl DbService {
 
         if let Some(league_id) = query.league_id {
             qb.push(" AND league_id = ").push_bind(league_id);
+        }
+
+        if let Some(tournament_id) = query.tournament_id {
+            qb.push(" AND tournament_id = ").push_bind(tournament_id);
+        }
+
+        if let Some(ref tournament_slug) = query.tournament_slug {
+            qb.push(" AND tournament_slug = ")
+                .push_bind(tournament_slug.clone());
         }
 
         if let Some(pool_configured) = query.pool_configured {
