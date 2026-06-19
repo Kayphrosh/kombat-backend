@@ -375,14 +375,6 @@ async fn main() -> anyhow::Result<()> {
             "/api/tournaments/source/grid/sync",
             post(sync_grid_tournaments),
         )
-        .route(
-            "/api/tournaments/source/grid",
-            get(get_tournament_source_grid),
-        )
-        .route(
-            "/api/tournaments/source/grid/sync",
-            post(sync_grid_tournaments),
-        )
         .route("/api/tournaments/:id", get(get_tournament))
         .route(
             "/api/admin/tournaments/:id/pool",

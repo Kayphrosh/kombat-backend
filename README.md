@@ -313,8 +313,9 @@ The backend owns GRID access and normalizes provider data. The mobile app should
 Admin-only GRID sync:
 
 ```http
-GET /api/tournaments/source/pandascore
-POST /api/tournaments/source/pandascore/sync
+GET /api/tournaments/source/grid
+POST /api/tournaments/source/grid/probe
+POST /api/tournaments/source/grid/sync
 X-Admin-Token: <admin-token>
 ```
 
@@ -324,14 +325,19 @@ Optional probe/sync body:
 
 ```json
 {
-  "statuses": ["upcoming", "running", "past"],
-  "videogame_slugs": ["csgo", "dota2", "lol"],
-  "max_pages": 1,
-  "per_page": 50
+  "statuses": [],
+  "videogame_slugs": ["csgo", "dota2", "lol", "valorant"],
+  "tournament_id": "optional-grid-tournament-id",
+  "tournament_slug": "optional-grid-tournament-slug",
+  "graphql_query": "optional GRID GraphQL match query from the portal",
+  "max_pages": 3,
+  "per_page": 100
 }
 ```
 
-`POST /api/tournaments` accepts PandaScore-shaped data for admin backfills and local development only. It is protected by the Kombat app JWT and should not be normal app flow.
+Leave `statuses` empty until the GRID account's exact status values are confirmed. Sync stores matches even when both opponents are not known yet; those are counted in `synced_incomplete`.
+
+`POST /api/tournaments` accepts provider-shaped data for admin backfills and local development only. It requires `X-Admin-Token` and should not be normal app flow.
 
 ## Smart Pay Staking
 
