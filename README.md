@@ -25,7 +25,7 @@ http://localhost:3000
 - `POST /api/auth/verify` is the exception. It returns `{ "user": ..., "accessToken": "..." }` directly.
 - Treat `401` as expired or invalid Kombat JWT. Clear the app token and re-run Dynamic verify.
 - The primary tournament staking path is payment intents, not direct `POST /api/tournaments/:id/stake`.
-- Frontend reads tournament data from Kombat endpoints. Do not call PandaScore directly from the app.
+- Frontend reads tournament data from Kombat endpoints. Do not call GRID directly from the app.
 - Transak is optional fallback only. Dynamic native funding is the primary on-ramp path.
 
 ## Dynamic Setup
@@ -283,8 +283,9 @@ Query params:
 
 - `status`: defaults to current feed (`upcoming` + `live`); accepts `active` for current feed and `completed`/`finished`/`past` for result history
 - `videogame`: videogame slug
-- `league_id`: PandaScore league id
-- `tournament_id`, `tournament_slug`: PandaScore tournament filters for full tournament/bracket views
+- `league_id`: provider league id
+- `tournament_id`, `tournament_slug`: provider tournament filters for full tournament/bracket views
+- `source`: defaults to `grid`; use `all` only for admin/debug views that need legacy rows
 - `search`: match name search
 - `limit`, `offset`
 
@@ -313,26 +314,30 @@ Admin-only GRID sync:
 
 ```http
 GET /api/tournaments/source/grid
+POST /api/tournaments/source/grid/probe
 POST /api/tournaments/source/grid/sync
 X-Admin-Token: <admin-token>
 ```
 
-Optional sync body:
+Probe first. GRID's public examples use GraphQL at `https://api-op.grid.gg/central-data/graphql` with `x-api-key`; if the portal gives a richer match query, pass it as `graphql_query` or set `GRID_GRAPHQL_QUERY` in the backend env.
+
+Optional probe/sync body:
 
 ```json
 {
-  "statuses": ["upcoming", "running"],
+  "statuses": [],
   "videogame_slugs": ["csgo", "dota2", "lol", "valorant"],
   "tournament_id": "optional-grid-tournament-id",
   "tournament_slug": "optional-grid-tournament-slug",
+  "graphql_query": "optional GRID GraphQL match query from the portal",
   "max_pages": 3,
   "per_page": 100
 }
 ```
 
-Sync stores matches even when both opponents are not known yet; those are counted in `synced_incomplete`.
+Leave `statuses` empty until the GRID account's exact status values are confirmed. Sync stores matches even when both opponents are not known yet; those are counted in `synced_incomplete`.
 
-`POST /api/tournaments` accepts PandaScore-shaped data for admin backfills and local development only. It requires `X-Admin-Token` and should not be normal app flow.
+`POST /api/tournaments` accepts provider-shaped data for admin backfills and local development only. It requires `X-Admin-Token` and should not be normal app flow.
 
 ## Smart Pay Staking
 
@@ -810,7 +815,7 @@ Use uploads for public app media such as avatars or event images. Use Walrus art
 
 ## Organizer Tournaments
 
-Organizer-created tournaments cover events PandaScore does not cover, such as CODM community tournaments.
+Organizer-created tournaments cover events GRID does not cover, such as CODM community tournaments.
 
 ### Organizer Onboarding
 
@@ -895,8 +900,8 @@ Content-Type: application/json
   "match_type": "best_of",
   "number_of_games": 3,
   "opponents": [
-    { "pandascore_id": 0, "opponent_type": "Team", "name": "Alpha Clan" },
-    { "pandascore_id": 0, "opponent_type": "Team", "name": "ZoneX" }
+    { "provider_id": 0, "opponent_type": "Team", "name": "Alpha Clan" },
+    { "provider_id": 0, "opponent_type": "Team", "name": "ZoneX" }
   ]
 }
 ```
@@ -1170,8 +1175,9 @@ POST /api/users/:wallet/push-token
 ```text
 GET /api/tournaments
 POST /api/tournaments
-GET /api/tournaments/source/pandascore
-POST /api/tournaments/source/pandascore/sync
+GET /api/tournaments/source/grid
+POST /api/tournaments/source/grid/probe
+POST /api/tournaments/source/grid/sync
 GET /api/tournaments/:id
 GET /api/tournaments/:id/outcome-proposals
 POST /api/tournaments/:id/outcome-proposals

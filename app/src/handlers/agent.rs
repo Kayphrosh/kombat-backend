@@ -111,14 +111,11 @@ pub async fn submit_agent_outcome_proposal(
         (None, req.evidence_url.clone())
     };
 
-    // --- #4: PandaScore cross-check ---
+    // --- #4: Provider cross-check ---
     let proposed_winner = req.proposed_winner_name.as_deref().unwrap_or("");
-    let (verification_status, verification_note) = agent_pipeline::cross_check_pandascore(
-        &state,
-        &match_with_odds.match_info,
-        proposed_winner,
-    )
-    .await;
+    let (verification_status, verification_note) =
+        agent_pipeline::cross_check_provider(&state, &match_with_odds.match_info, proposed_winner)
+            .await;
 
     // --- #2: Confidence threshold gate ---
     let confidence_f64 = req

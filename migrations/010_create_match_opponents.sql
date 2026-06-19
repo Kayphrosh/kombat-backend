@@ -6,7 +6,7 @@ CREATE TABLE IF NOT EXISTS match_opponents (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     match_id            UUID NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
     
-    -- PandaScore opponent info
+    -- Provider opponent info. Column name is legacy from the original provider.
     pandascore_id       INTEGER NOT NULL,             -- Team or player ID
     opponent_type       VARCHAR(20) NOT NULL,         -- "Team" or "Player"
     

@@ -10,6 +10,7 @@ use tokio::sync::RwLock;
 
 /// Claims embedded in the Dynamic SDK JWT.
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct DynamicClaims {
     /// Wallet address (may be in `verified_credentials` or top-level)
     pub sub: Option<String>,
@@ -21,6 +22,7 @@ pub struct DynamicClaims {
 }
 
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct DynamicCredential {
     pub address: Option<String>,
     pub chain: Option<String>,
@@ -114,6 +116,7 @@ impl DynamicClaims {
 
 /// JWKS key entry from Dynamic's well-known endpoint.
 #[derive(Debug, Deserialize, Clone)]
+#[allow(dead_code)]
 struct JwksKey {
     kty: String,
     kid: Option<String>,

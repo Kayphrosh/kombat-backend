@@ -2,7 +2,9 @@ use anyhow::{anyhow, Result};
 use reqwest::Client;
 use serde_json::{json, Value};
 
-use crate::models::{CreateMatchRequest, CreateOpponentRequest, GridSyncRequest};
+use crate::models::{
+    CreateMatchRequest, CreateOpponentRequest, GridProbeResponse, GridSyncRequest,
+};
 
 #[derive(Debug, Clone)]
 pub struct GridConfig {
@@ -11,6 +13,8 @@ pub struct GridConfig {
     pub base_url: String,
     pub matches_path: String,
     pub auth_header: String,
+    pub api_style: String,
+    pub graphql_query: Option<String>,
     pub default_statuses: Vec<String>,
     pub default_videogame_slugs: Vec<String>,
     pub default_per_page: u32,
@@ -24,18 +28,32 @@ impl GridConfig {
             .filter(|key| !key.trim().is_empty());
         let enabled = env_bool("GRID_ENABLED", api_key.is_some());
         let base_url = std::env::var("GRID_BASE_URL")
-            .unwrap_or_else(|_| "https://api.grid.gg".to_string())
+            .unwrap_or_else(|_| "https://api-op.grid.gg".to_string())
             .trim_end_matches('/')
             .to_string();
         let matches_path = std::env::var("GRID_MATCHES_PATH")
-            .unwrap_or_else(|_| "/matches".to_string())
+            .unwrap_or_else(|_| "central-data/graphql".to_string())
             .trim()
             .trim_start_matches('/')
             .to_string();
         let auth_header =
             std::env::var("GRID_AUTH_HEADER").unwrap_or_else(|_| "x-api-key".to_string());
-        let default_statuses = env_csv("GRID_DEFAULT_STATUSES")
-            .unwrap_or_else(|| vec!["upcoming".to_string(), "running".to_string()]);
+        let api_style = std::env::var("GRID_API_STYLE")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| {
+                if matches_path.contains("graphql") {
+                    "graphql".to_string()
+                } else {
+                    "rest".to_string()
+                }
+            });
+        let graphql_query = std::env::var("GRID_GRAPHQL_QUERY")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let default_statuses = env_csv("GRID_DEFAULT_STATUSES").unwrap_or_default();
         let default_videogame_slugs = env_csv("GRID_VIDEOGAME_SLUGS").unwrap_or_default();
         let default_per_page = std::env::var("GRID_PER_PAGE")
             .ok()
@@ -54,6 +72,8 @@ impl GridConfig {
             base_url,
             matches_path,
             auth_header,
+            api_style,
+            graphql_query,
             default_statuses,
             default_videogame_slugs,
             default_per_page,
@@ -62,7 +82,10 @@ impl GridConfig {
     }
 
     pub fn configured(&self) -> bool {
-        self.enabled && self.api_key.is_some()
+        self.enabled
+            && self.api_key.is_some()
+            && !self.base_url.is_empty()
+            && !self.matches_path.is_empty()
     }
 }
 
@@ -84,20 +107,21 @@ impl GridService {
     }
 
     pub async fn fetch_matches(&self, req: &GridSyncRequest) -> Result<Vec<CreateMatchRequest>> {
-        if !self.config.enabled {
-            return Err(anyhow!("GRID sync is disabled"));
-        }
-        let api_key = self
-            .config
-            .api_key
-            .as_ref()
-            .ok_or_else(|| anyhow!("GRID_API_KEY is not configured"))?;
+        let api_key = self.api_key()?;
 
         let statuses = req
             .statuses
             .clone()
-            .filter(|items| !items.is_empty())
-            .unwrap_or_else(|| self.config.default_statuses.clone());
+            .unwrap_or_else(|| self.config.default_statuses.clone())
+            .into_iter()
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect::<Vec<_>>();
+        let status_filters = if statuses.is_empty() {
+            vec![None]
+        } else {
+            statuses.into_iter().map(Some).collect::<Vec<_>>()
+        };
         let videogame_slugs = req
             .videogame_slugs
             .clone()
@@ -111,12 +135,16 @@ impl GridService {
             .unwrap_or(self.config.default_per_page)
             .clamp(1, 100);
 
+        if self.is_graphql() {
+            return self.fetch_graphql_matches(api_key, req, per_page).await;
+        }
+
         let mut matches = Vec::new();
-        for status in statuses {
+        for status in status_filters {
             if videogame_slugs.is_empty() {
                 self.fetch_status(
                     api_key,
-                    &status,
+                    status.as_deref(),
                     None,
                     req.tournament_id.as_deref(),
                     req.tournament_slug.as_deref(),
@@ -129,7 +157,7 @@ impl GridService {
                 for slug in &videogame_slugs {
                     self.fetch_status(
                         api_key,
-                        &status,
+                        status.as_deref(),
                         Some(slug.as_str()),
                         req.tournament_id.as_deref(),
                         req.tournament_slug.as_deref(),
@@ -145,11 +173,215 @@ impl GridService {
         Ok(matches)
     }
 
+    pub async fn probe_matches(&self, req: &GridSyncRequest) -> Result<GridProbeResponse> {
+        let api_key = self.api_key()?;
+        if self.is_graphql() {
+            return self.probe_graphql_matches(api_key, req).await;
+        }
+
+        let status = req
+            .statuses
+            .as_ref()
+            .and_then(|items| items.iter().find(|item| !item.trim().is_empty()))
+            .cloned()
+            .or_else(|| self.config.default_statuses.first().cloned())
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty());
+        let videogame_slug = req
+            .videogame_slugs
+            .as_ref()
+            .and_then(|items| items.iter().find(|item| !item.trim().is_empty()))
+            .cloned()
+            .or_else(|| self.config.default_videogame_slugs.first().cloned());
+        let per_page = req
+            .per_page
+            .unwrap_or(self.config.default_per_page)
+            .clamp(1, 100);
+        let page = 1u32;
+        let path = format!("{}/{}", self.config.base_url, self.config.matches_path);
+        let mut request = self
+            .client
+            .get(&path)
+            .header(&self.config.auth_header, api_key)
+            .query(&[
+                ("page", page.to_string()),
+                ("per_page", per_page.to_string()),
+                ("limit", per_page.to_string()),
+            ]);
+
+        let mut url_params = vec![
+            format!("page={}", page),
+            format!("per_page={}", per_page),
+            format!("limit={}", per_page),
+        ];
+
+        if let Some(status) = status.as_deref() {
+            request = request.query(&[("status", status.to_string())]);
+            url_params.push(format!("status={}", status));
+        }
+        if let Some(slug) = videogame_slug.as_deref() {
+            request = request.query(&[
+                ("videogame", slug.to_string()),
+                ("videogame_slug", slug.to_string()),
+            ]);
+            url_params.push(format!("videogame={}", slug));
+            url_params.push(format!("videogame_slug={}", slug));
+        }
+        if let Some(id) = req.tournament_id.as_deref() {
+            request = request.query(&[("tournament_id", id.to_string())]);
+            url_params.push(format!("tournament_id={}", id));
+        }
+        if let Some(slug) = req.tournament_slug.as_deref() {
+            request = request.query(&[("tournament_slug", slug.to_string())]);
+            url_params.push(format!("tournament_slug={}", slug));
+        }
+
+        let response = request.send().await?;
+        let http_status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        let mut item_count = 0usize;
+        let mut parsed_count = 0usize;
+
+        if http_status.is_success() {
+            if let Ok(raw) = serde_json::from_str::<Value>(&body) {
+                let raw_matches = extract_items(&raw);
+                item_count = raw_matches.len();
+                parsed_count = raw_matches
+                    .into_iter()
+                    .filter_map(grid_match_from_value)
+                    .count();
+            }
+        }
+
+        Ok(GridProbeResponse {
+            provider: "grid".to_string(),
+            url: format!("{}?{}", path, url_params.join("&")),
+            http_status: http_status.as_u16(),
+            success: http_status.is_success(),
+            item_count,
+            parsed_count,
+            body_preview: truncate_body(&body, 1200),
+        })
+    }
+
+    fn is_graphql(&self) -> bool {
+        self.config.api_style.eq_ignore_ascii_case("graphql")
+            || self.config.matches_path.contains("graphql")
+    }
+
+    async fn fetch_graphql_matches(
+        &self,
+        api_key: &str,
+        req: &GridSyncRequest,
+        per_page: u32,
+    ) -> Result<Vec<CreateMatchRequest>> {
+        let (_, body, _) = self.send_graphql_request(api_key, req, per_page).await?;
+        let raw: Value = serde_json::from_str(&body)?;
+        if let Some(errors) = raw.get("errors") {
+            return Err(anyhow!("GRID GraphQL returned errors: {}", errors));
+        }
+
+        let status_filters = normalized_status_filters(req, &self.config.default_statuses);
+        let videogame_filters =
+            normalized_videogame_filters(req, &self.config.default_videogame_slugs);
+        let matches = extract_items(&raw)
+            .into_iter()
+            .filter_map(grid_match_from_value)
+            .filter(|item| match_status_allowed(item, &status_filters))
+            .filter(|item| match_videogame_allowed(item, &videogame_filters))
+            .collect();
+
+        Ok(matches)
+    }
+
+    async fn probe_graphql_matches(
+        &self,
+        api_key: &str,
+        req: &GridSyncRequest,
+    ) -> Result<GridProbeResponse> {
+        let per_page = req
+            .per_page
+            .unwrap_or(self.config.default_per_page)
+            .clamp(1, 100);
+        let (http_status, body, url) = self.send_graphql_request(api_key, req, per_page).await?;
+        let mut item_count = 0usize;
+        let mut parsed_count = 0usize;
+
+        if http_status.is_success() {
+            if let Ok(raw) = serde_json::from_str::<Value>(&body) {
+                let raw_matches = extract_items(&raw);
+                item_count = raw_matches.len();
+                parsed_count = raw_matches
+                    .into_iter()
+                    .filter_map(grid_match_from_value)
+                    .count();
+            }
+        }
+
+        Ok(GridProbeResponse {
+            provider: "grid".to_string(),
+            url,
+            http_status: http_status.as_u16(),
+            success: http_status.is_success(),
+            item_count,
+            parsed_count,
+            body_preview: truncate_body(&body, 1200),
+        })
+    }
+
+    async fn send_graphql_request(
+        &self,
+        api_key: &str,
+        req: &GridSyncRequest,
+        per_page: u32,
+    ) -> Result<(reqwest::StatusCode, String, String)> {
+        let path = format!("{}/{}", self.config.base_url, self.config.matches_path);
+        let query = req
+            .graphql_query
+            .as_ref()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(|| self.config.graphql_query.clone())
+            .unwrap_or_else(default_graphql_query);
+        let variables = graphql_variables(req, &self.config, per_page);
+        let response = self
+            .client
+            .post(&path)
+            .header(&self.config.auth_header, api_key)
+            .header("content-type", "application/json")
+            .json(&json!({
+                "query": query,
+                "variables": variables,
+            }))
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        Ok((status, body, path))
+    }
+
+    fn api_key(&self) -> Result<&str> {
+        if !self.config.enabled {
+            return Err(anyhow!("GRID sync is disabled"));
+        }
+        if self.config.base_url.is_empty() {
+            return Err(anyhow!("GRID_BASE_URL is not configured"));
+        }
+        if self.config.matches_path.is_empty() {
+            return Err(anyhow!("GRID_MATCHES_PATH is not configured"));
+        }
+        self.config
+            .api_key
+            .as_ref()
+            .map(String::as_str)
+            .ok_or_else(|| anyhow!("GRID_API_KEY is not configured"))
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn fetch_status(
         &self,
         api_key: &str,
-        status: &str,
+        status: Option<&str>,
         videogame_slug: Option<&str>,
         tournament_id: Option<&str>,
         tournament_slug: Option<&str>,
@@ -167,8 +399,10 @@ impl GridService {
                     ("page", page.to_string()),
                     ("per_page", per_page.to_string()),
                     ("limit", per_page.to_string()),
-                    ("status", status.to_string()),
                 ]);
+            if let Some(status) = status {
+                request = request.query(&[("status", status.to_string())]);
+            }
             if let Some(slug) = videogame_slug {
                 request = request.query(&[
                     ("videogame", slug.to_string()),
@@ -202,6 +436,85 @@ impl GridService {
     }
 }
 
+fn default_graphql_query() -> String {
+    r#"
+query KombatGridMatches {
+  matches {
+    edges {
+      node {
+        id
+        name
+      }
+    }
+  }
+}
+"#
+    .to_string()
+}
+
+fn graphql_variables(req: &GridSyncRequest, config: &GridConfig, per_page: u32) -> Value {
+    let statuses = normalized_status_filters(req, &config.default_statuses);
+    let videogame_slugs = normalized_videogame_filters(req, &config.default_videogame_slugs);
+
+    json!({
+        "first": per_page,
+        "limit": per_page,
+        "statuses": statuses,
+        "status": statuses.first().cloned(),
+        "videogameSlugs": videogame_slugs,
+        "videogameSlug": videogame_slugs.first().cloned(),
+        "tournamentId": req.tournament_id.as_deref(),
+        "tournamentSlug": req.tournament_slug.as_deref(),
+    })
+}
+
+fn normalized_status_filters(req: &GridSyncRequest, defaults: &[String]) -> Vec<String> {
+    req.statuses
+        .clone()
+        .unwrap_or_else(|| defaults.to_vec())
+        .into_iter()
+        .map(|item| normalize_status(&item))
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+fn normalized_videogame_filters(req: &GridSyncRequest, defaults: &[String]) -> Vec<String> {
+    req.videogame_slugs
+        .clone()
+        .unwrap_or_else(|| defaults.to_vec())
+        .into_iter()
+        .map(|item| item.trim().to_ascii_lowercase())
+        .filter(|item| !item.is_empty())
+        .collect()
+}
+
+fn match_status_allowed(item: &CreateMatchRequest, filters: &[String]) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    item.pandascore_status
+        .as_deref()
+        .map(|status| {
+            filters
+                .iter()
+                .any(|filter| filter == &normalize_status(status))
+        })
+        .unwrap_or(false)
+}
+
+fn match_videogame_allowed(item: &CreateMatchRequest, filters: &[String]) -> bool {
+    if filters.is_empty() {
+        return true;
+    }
+    item.videogame_slug
+        .as_deref()
+        .map(|slug| {
+            let slug = slug.trim().to_ascii_lowercase();
+            filters.iter().any(|filter| filter == &slug)
+        })
+        .unwrap_or(false)
+}
+
 fn grid_match_from_value(raw: Value) -> Option<CreateMatchRequest> {
     let external_id = string_or_number_at_any(
         &raw,
@@ -213,12 +526,12 @@ fn grid_match_from_value(raw: Value) -> Option<CreateMatchRequest> {
             &["data", "id"],
         ],
     )?;
-    let pandascore_id = external_id_to_i64(&external_id);
+    let provider_numeric_id = external_id_to_i64(&external_id);
     let opponents = opponents_from_value(&raw);
     let raw_data = with_provider_metadata(raw, &external_id);
 
     Some(CreateMatchRequest {
-        pandascore_id,
+        pandascore_id: provider_numeric_id,
         slug: string_at_any(
             &raw_data,
             &[&["slug"], &["name"], &["match", "slug"], &["data", "slug"]],
@@ -374,8 +687,10 @@ fn opponent_from_value(raw: &Value) -> Option<CreateOpponentRequest> {
         ],
     )?;
 
+    let provider_numeric_id = external_id_to_i32(&id);
+
     Some(CreateOpponentRequest {
-        pandascore_id: external_id_to_i32(&id),
+        pandascore_id: provider_numeric_id,
         opponent_type: string_at_any(raw, &[&["type"], &["opponent_type"], &["kind"]])
             .unwrap_or_else(|| "Team".to_string()),
         name,
@@ -406,7 +721,29 @@ fn extract_items(value: &Value) -> Vec<Value> {
         }
     }
 
+    for path in [
+        &["edges"][..],
+        &["data", "edges"][..],
+        &["data", "matches", "edges"][..],
+        &["data", "items", "edges"][..],
+    ] {
+        if let Some(items) = value_at(value, path).and_then(Value::as_array) {
+            return items
+                .iter()
+                .filter_map(|item| item.get("node").cloned().or_else(|| Some(item.clone())))
+                .collect();
+        }
+    }
+
     Vec::new()
+}
+
+fn truncate_body(value: &str, max_chars: usize) -> String {
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
 }
 
 fn with_provider_metadata(mut raw: Value, external_id: &str) -> Value {
@@ -418,11 +755,13 @@ fn with_provider_metadata(mut raw: Value, external_id: &str) -> Value {
 }
 
 fn normalize_status(status: &str) -> String {
-    match status.to_ascii_lowercase().as_str() {
+    match status.trim().to_ascii_lowercase().as_str() {
         "scheduled" | "created" | "not_started" | "not-started" | "upcoming" => {
             "not_started".to_string()
         }
-        "live" | "running" | "in_progress" | "in-progress" | "started" => "running".to_string(),
+        "live" | "running" | "in_progress" | "in-progress" | "started" | "ongoing" => {
+            "running".to_string()
+        }
         "complete" | "completed" | "finished" | "ended" => "finished".to_string(),
         "cancelled" | "canceled" | "deleted" => "canceled".to_string(),
         "postponed" | "delayed" => "postponed".to_string(),
@@ -502,4 +841,64 @@ fn env_csv(name: &str) -> Option<Vec<String>> {
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     Some(values)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_rest_like_match_payload() {
+        let raw = serde_json::json!({
+            "id": "grid-match-1",
+            "name": "Alpha vs Beta",
+            "status": "scheduled",
+            "scheduledAt": "2026-06-20T18:00:00Z",
+            "game": { "id": 23, "name": "Call of Duty", "slug": "codm" },
+            "competition": { "id": 77, "name": "GRID Cup", "slug": "grid-cup" },
+            "tournament": { "id": 88, "name": "Playoffs", "slug": "grid-cup-playoffs" },
+            "competitors": [
+                { "id": "team-a", "name": "Alpha", "shortName": "ALP" },
+                { "id": "team-b", "name": "Beta", "shortName": "BET" }
+            ]
+        });
+
+        let parsed = grid_match_from_value(raw).expect("match should parse");
+        assert_eq!(parsed.source.as_deref(), Some("grid"));
+        assert_eq!(parsed.name, "Alpha vs Beta");
+        assert_eq!(parsed.pandascore_status.as_deref(), Some("not_started"));
+        assert_eq!(parsed.opponents.len(), 2);
+        assert_eq!(parsed.opponents[0].name, "Alpha");
+    }
+
+    #[test]
+    fn extracts_graphql_edges_nodes() {
+        let raw = serde_json::json!({
+            "data": {
+                "matches": {
+                    "edges": [
+                        {
+                            "node": {
+                                "id": "grid-match-2",
+                                "name": "Gamma vs Delta",
+                                "state": "live",
+                                "startTime": "2026-06-20T19:00:00Z",
+                                "teams": [
+                                    { "id": "team-g", "name": "Gamma" },
+                                    { "id": "team-d", "name": "Delta" }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+
+        let items = extract_items(&raw);
+        assert_eq!(items.len(), 1);
+        let parsed = grid_match_from_value(items[0].clone()).expect("match should parse");
+        assert_eq!(parsed.name, "Gamma vs Delta");
+        assert_eq!(parsed.pandascore_status.as_deref(), Some("running"));
+        assert_eq!(parsed.opponents.len(), 2);
+    }
 }

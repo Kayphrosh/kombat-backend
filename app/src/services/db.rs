@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::models::{
     NotificationRecord, UpdateProfileRequest, UserRecord, WagerListQuery, WagerRecord,
 };
@@ -953,7 +955,7 @@ impl DbService {
 
     // ── Match CRUD ──────────────────────────────────────────────────────────────
 
-    /// Create or update a match from PandaScore data
+    /// Create or update a match from provider data.
     pub async fn upsert_match(
         &self,
         req: &crate::models::CreateMatchRequest,
@@ -975,17 +977,14 @@ impl DbService {
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|dt| dt.with_timezone(&chrono::Utc));
 
-        let pandascore_status = req
+        let provider_status = req
             .pandascore_status
             .clone()
             .unwrap_or_else(|| "not_started".to_string());
-        let source = req
-            .source
-            .clone()
-            .unwrap_or_else(|| "pandascore".to_string());
+        let source = req.source.clone().unwrap_or_else(|| "grid".to_string());
 
-        // Determine our internal status based on PandaScore status
-        let status = match pandascore_status.as_str() {
+        // Determine our internal status based on provider status.
+        let status = match provider_status.as_str() {
             "not_started" => "upcoming",
             "running" => "live",
             "finished" => "completed",
@@ -1051,7 +1050,7 @@ impl DbService {
         .bind(end_at)
         .bind(&req.match_type)
         .bind(req.number_of_games)
-        .bind(&pandascore_status)
+        .bind(&provider_status)
         .bind(status)
         .bind(&req.streams_list)
         .bind(&req.raw_data)
@@ -1880,15 +1879,15 @@ impl DbService {
         }))
     }
 
-    /// Get a match by PandaScore ID
-    pub async fn get_match_by_pandascore_id(
+    /// Get a match by the legacy numeric provider ID column.
+    pub async fn get_match_by_provider_numeric_id(
         &self,
-        pandascore_id: i64,
+        provider_id: i64,
     ) -> Result<Option<crate::models::MatchRecord>> {
         let row = sqlx::query_as::<_, crate::models::MatchRecord>(
             "SELECT * FROM matches WHERE pandascore_id = $1",
         )
-        .bind(pandascore_id)
+        .bind(provider_id)
         .fetch_optional(&self.pool)
         .await?;
         Ok(row)
@@ -1945,7 +1944,7 @@ impl DbService {
     }
 
     /// Matches that are past their scheduled time, still open, have a
-    /// PandaScore id, and haven't had an outcome proposal submitted yet.
+    /// provider id, and haven't had an outcome proposal submitted yet.
     /// `lookback_hours` caps how far back we look to avoid re-checking old
     /// settled matches on restart.
     pub async fn get_pollable_matches(
@@ -2079,6 +2078,18 @@ impl DbService {
         };
         if let Some(statuses) = statuses {
             qb.push(" AND status = ANY(").push_bind(statuses).push(")");
+        }
+
+        match query.source.as_deref().map(str::trim) {
+            None | Some("") => {
+                qb.push(" AND source = 'grid'");
+            }
+            Some(source)
+                if source.eq_ignore_ascii_case("all") || source.eq_ignore_ascii_case("any") => {}
+            Some(source) => {
+                qb.push(" AND source = ")
+                    .push_bind(source.to_ascii_lowercase());
+            }
         }
 
         if let Some(ref vg) = query.videogame {
@@ -2606,7 +2617,7 @@ impl DbService {
         &self,
         match_id: &str,
         winner_opponent_id: &str,
-        pandascore_winner_id: Option<i32>,
+        provider_winner_id: Option<i32>,
         forfeit: bool,
     ) -> Result<crate::models::ResolveResult> {
         use crate::models::{PayoutEntry, ResolveResult};
@@ -2653,7 +2664,7 @@ impl DbService {
             // No stakes at all - just mark complete
             sqlx::query("UPDATE matches SET status = 'completed', winner_id = $2, forfeit = $3, updated_at = NOW() WHERE id = $1")
                 .bind(match_uuid)
-                .bind(pandascore_winner_id)
+                .bind(provider_winner_id)
                 .bind(forfeit)
                 .execute(&mut *tx)
                 .await?;
@@ -2686,7 +2697,7 @@ impl DbService {
 
             sqlx::query("UPDATE matches SET status = 'refunded', winner_id = $2, forfeit = $3, updated_at = NOW() WHERE id = $1")
                 .bind(match_uuid)
-                .bind(pandascore_winner_id)
+                .bind(provider_winner_id)
                 .bind(forfeit)
                 .execute(&mut *tx)
                 .await?;
@@ -2746,7 +2757,7 @@ impl DbService {
         // Update match
         sqlx::query("UPDATE matches SET status = 'completed', winner_id = $2, forfeit = $3, pandascore_status = 'finished', updated_at = NOW() WHERE id = $1")
             .bind(match_uuid)
-            .bind(pandascore_winner_id)
+            .bind(provider_winner_id)
             .bind(forfeit)
             .execute(&mut *tx)
             .await?;
@@ -3062,12 +3073,12 @@ impl DbService {
         Ok(transactions)
     }
 
-    /// Update match status (for syncing with PandaScore)
-    pub async fn update_match_status(&self, match_id: &str, pandascore_status: &str) -> Result<()> {
+    /// Update match status (for provider/manual syncs).
+    pub async fn update_match_status(&self, match_id: &str, provider_status: &str) -> Result<()> {
         let match_uuid = uuid::Uuid::parse_str(match_id)
             .map_err(|e| anyhow::anyhow!("Invalid match ID: {}", e))?;
 
-        let status = match pandascore_status {
+        let status = match provider_status {
             "not_started" => "upcoming",
             "running" => "live",
             "finished" => "completed",
@@ -3078,7 +3089,7 @@ impl DbService {
 
         sqlx::query("UPDATE matches SET pandascore_status = $2, status = $3, updated_at = NOW() WHERE id = $1")
             .bind(match_uuid)
-            .bind(pandascore_status)
+            .bind(provider_status)
             .bind(status)
             .execute(&self.pool)
             .await?;

@@ -9,5 +9,5 @@ ALTER TABLE wagers ADD COLUMN IF NOT EXISTS match_opponent_id UUID REFERENCES ma
 CREATE INDEX IF NOT EXISTS idx_wagers_match ON wagers(match_id);
 
 -- Add comment
-COMMENT ON COLUMN wagers.match_id IS 'Optional reference to a PandaScore match for tournament-linked wagers';
+COMMENT ON COLUMN wagers.match_id IS 'Optional reference to a provider-backed match for tournament-linked wagers';
 COMMENT ON COLUMN wagers.match_opponent_id IS 'Which opponent the initiator picked for this wager';

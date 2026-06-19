@@ -88,27 +88,9 @@ pub struct DeclineWagerRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct FundWagerRequest {
-    pub initiator: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ResolveWagerRequest {
-    pub winner: String,
-    pub caller: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
 pub struct ConsentRequest {
     pub participant: String,
     pub declared_winner: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct DisputeRequest {
-    pub opener: String,
-    pub description: Option<String>,
-    pub evidence_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -236,6 +218,7 @@ pub struct NotificationListQuery {
 // ─── Transaction Response ─────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[allow(dead_code)]
 pub struct TxResponse {
     pub transaction_b64: String,
     pub description: String,
@@ -355,7 +338,7 @@ pub struct UploadResponse {
 // TOURNAMENT / MATCH BETTING (Pool Staking)
 // ═══════════════════════════════════════════════════════════════════════════════
 
-// ─── Match Record (from PandaScore) ───────────────────────────────────────────
+// ─── Match Record (from the configured esports data provider) ────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone, sqlx::FromRow)]
 pub struct MatchRecord {
@@ -412,8 +395,7 @@ pub struct MatchRecord {
     pub sui_network: Option<String>,
     pub sui_pool_object_id: Option<String>,
 
-    // Source and verification metadata. PandaScore remains supported, while
-    // organizer-created markets and agent proposals use these fields.
+    // Source and verification metadata.
     pub source: String,
     pub organizer_tournament_id: Option<Uuid>,
     pub organizer_wallet: Option<String>,
@@ -570,9 +552,10 @@ impl OpponentWithPoolRow {
 
 // ─── API Request Types ───────────────────────────────────────────────────────
 
-/// Create/sync a match from PandaScore-shaped data for admin backfills.
+/// Create/sync a match from provider-shaped data for admin backfills.
 #[derive(Debug, Deserialize)]
 pub struct CreateMatchRequest {
+    #[serde(alias = "provider_id", alias = "external_id")]
     pub pandascore_id: i64,
     pub slug: Option<String>,
     pub name: String,
@@ -608,6 +591,7 @@ pub struct CreateMatchRequest {
     pub number_of_games: Option<i32>,
 
     // Status
+    #[serde(alias = "provider_status")]
     pub pandascore_status: Option<String>,
 
     // Opponents (2 required for betting)
@@ -629,6 +613,7 @@ pub struct CreateMatchRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateOpponentRequest {
+    #[serde(alias = "provider_id", alias = "external_id")]
     pub pandascore_id: i32,
     pub opponent_type: String, // "Team" or "Player"
     pub name: String,
@@ -925,6 +910,7 @@ pub struct AgentOutcomeProposalRequest {
     pub proposed_winner_opponent_id: Option<String>,
     pub proposed_winner_name: Option<String>,
     pub confidence: Option<rust_decimal::Decimal>,
+    #[allow(dead_code)]
     pub evidence_blob_id: Option<String>,
     pub evidence_url: Option<String>,
     pub evidence_summary: Option<String>,
@@ -970,7 +956,8 @@ pub struct PayoutCalculation {
 #[derive(Debug, Deserialize)]
 pub struct ResolveMatchRequest {
     pub winner_opponent_id: String, // UUID of the winning opponent
-    pub pandascore_winner_id: Option<i32>,
+    #[serde(alias = "pandascore_winner_id")]
+    pub provider_winner_id: Option<i32>,
     pub forfeit: Option<bool>,
 }
 
@@ -1002,41 +989,11 @@ pub struct MatchListQuery {
     pub league_id: Option<i32>,
     pub tournament_id: Option<i32>,
     pub tournament_slug: Option<String>,
+    pub source: Option<String>, // defaults to grid; use all for legacy/admin views
     pub pool_configured: Option<bool>,
     pub search: Option<String>, // Search in name
     pub limit: Option<i64>,
     pub offset: Option<i64>,
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PandaScoreSyncRequest {
-    pub statuses: Option<Vec<String>>,
-    pub videogame_slugs: Option<Vec<String>>,
-    pub max_pages: Option<u32>,
-    pub per_page: Option<u32>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PandaScoreSyncResponse {
-    pub provider: String,
-    pub fetched: usize,
-    pub synced: usize,
-    pub synced_incomplete: usize,
-    pub skipped: usize,
-    pub resolved: usize,
-    pub errors: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-pub struct PandaScoreSourceResponse {
-    pub provider: String,
-    pub enabled: bool,
-    pub configured: bool,
-    pub base_url: String,
-    pub default_statuses: Vec<String>,
-    pub default_videogame_slugs: Vec<String>,
-    pub default_per_page: u32,
-    pub default_max_pages: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1045,6 +1002,7 @@ pub struct GridSyncRequest {
     pub videogame_slugs: Option<Vec<String>>,
     pub tournament_id: Option<String>,
     pub tournament_slug: Option<String>,
+    pub graphql_query: Option<String>,
     pub max_pages: Option<u32>,
     pub per_page: Option<u32>,
 }
@@ -1068,10 +1026,22 @@ pub struct GridSourceResponse {
     pub base_url: String,
     pub matches_path: String,
     pub auth_header: String,
+    pub api_style: String,
     pub default_statuses: Vec<String>,
     pub default_videogame_slugs: Vec<String>,
     pub default_per_page: u32,
     pub default_max_pages: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct GridProbeResponse {
+    pub provider: String,
+    pub url: String,
+    pub http_status: u16,
+    pub success: bool,
+    pub item_count: usize,
+    pub parsed_count: usize,
+    pub body_preview: String,
 }
 
 #[derive(Debug, Deserialize)]
