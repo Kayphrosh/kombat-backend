@@ -12,7 +12,7 @@ use crate::{
         AgentOutcomeProposalRequest, ApiResponse, CreateOutcomeProposalRequest,
         CreateWalrusArtifactRequest,
     },
-    services::{agent_pipeline, pandascore::result_from_match},
+    services::agent_pipeline,
     state::AppState,
 };
 
@@ -43,7 +43,7 @@ fn unauthorized(msg: impl Into<String>) -> (StatusCode, Json<ApiResponse<()>>) {
 /// Organizer systems POST this when they have a confirmed result.
 #[derive(Debug, serde::Deserialize)]
 pub struct MatchResultWebhookPayload {
-    /// Our internal match UUID OR a PandaScore match id (integer string).
+    /// Our internal match UUID OR a legacy numeric provider id.
     pub match_id: String,
     /// Name of the winning opponent — used to find our match_opponents row.
     pub winner_name: String,
@@ -86,84 +86,6 @@ pub async fn handle_match_result_webhook(
     .await
 }
 
-// ─── PandaScore native webhook ─────────────────────────────────────────────────
-
-/// PandaScore sends `match.end` events in this shape (simplified).
-/// Full spec: https://developers.pandascore.co/docs/webhooks
-#[derive(Debug, serde::Deserialize)]
-pub struct PandaScoreWebhookPayload {
-    #[serde(rename = "type")]
-    pub event_type: String,
-    #[serde(rename = "object")]
-    pub match_object: serde_json::Value,
-}
-
-/// PandaScore native webhook endpoint.
-/// PandaScore signs payloads with an `X-PandaScore-Token` header that equals
-/// the secret token you configured in their dashboard — stored as
-/// `PANDASCORE_WEBHOOK_TOKEN`.
-pub async fn handle_pandascore_webhook(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    body: axum::body::Bytes,
-) -> AppResult<serde_json::Value> {
-    verify_pandascore_token(&headers)?;
-
-    let payload: PandaScoreWebhookPayload =
-        serde_json::from_slice(&body).map_err(|e| bad_request(format!("Invalid JSON: {}", e)))?;
-
-    // Only act on match.end events
-    if payload.event_type != "match.end" {
-        return Ok(Json(ApiResponse::ok(
-            serde_json::json!({ "ignored": true, "event_type": payload.event_type }),
-        )));
-    }
-
-    let ps_result = result_from_match(&payload.match_object);
-
-    if !ps_result.finished {
-        return Ok(Json(ApiResponse::ok(
-            serde_json::json!({ "ignored": true, "reason": "match not finished" }),
-        )));
-    }
-
-    let winner_name = match ps_result.winner_name.as_deref() {
-        Some(n) if !n.is_empty() => n.to_string(),
-        _ => {
-            return Ok(Json(ApiResponse::ok(
-                serde_json::json!({ "ignored": true, "reason": "no winner in payload" }),
-            )))
-        }
-    };
-
-    let ps_match_id = payload
-        .match_object
-        .get("id")
-        .and_then(|v| v.as_i64())
-        .ok_or_else(|| bad_request("PandaScore payload missing match id"))?;
-
-    // Build evidence from the raw PandaScore object
-    let evidence = serde_json::json!({
-        "match_id": ps_match_id.to_string(),
-        "winner": winner_name,
-        "source_data": payload.match_object,
-        "timestamp": chrono::Utc::now().to_rfc3339(),
-    });
-
-    let match_id_str = ps_match_id.to_string();
-    process_match_result(
-        &state,
-        &match_id_str,
-        &winner_name,
-        Some(rust_decimal::Decimal::ONE),
-        &evidence,
-        Some("PandaScore match.end event"),
-        None,
-        "pandascore_webhook",
-    )
-    .await
-}
-
 // ─── Shared processing ─────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -177,7 +99,8 @@ async fn process_match_result(
     result_url: Option<&str>,
     source_label: &str,
 ) -> AppResult<serde_json::Value> {
-    // Resolve to our internal match record — accept UUID or PandaScore id
+    // Resolve to our internal match record. UUID is preferred; legacy numeric
+    // provider ids remain accepted for backfills.
     let match_record = if let Ok(uuid) = uuid::Uuid::parse_str(match_id_input) {
         state
             .db
@@ -188,10 +111,10 @@ async fn process_match_result(
     } else if let Ok(ps_id) = match_id_input.parse::<i64>() {
         let m = state
             .db
-            .get_match_by_pandascore_id(ps_id)
+            .get_match_by_provider_numeric_id(ps_id)
             .await
             .map_err(|e| internal_error(e.to_string()))?
-            .ok_or_else(|| bad_request("Match not found for PandaScore id"))?;
+            .ok_or_else(|| bad_request("Match not found for provider id"))?;
         state
             .db
             .get_match_with_odds(&m.id.to_string())
@@ -200,7 +123,7 @@ async fn process_match_result(
             .ok_or_else(|| bad_request("Match not found"))?
     } else {
         return Err(bad_request(
-            "match_id must be a UUID or a PandaScore integer id",
+            "match_id must be a UUID or a provider integer id",
         ));
     };
 
@@ -247,9 +170,8 @@ async fn process_match_result(
         (None, result_url.map(ToString::to_string))
     };
 
-    // PandaScore cross-check
     let (verification_status, verification_note) =
-        agent_pipeline::cross_check_pandascore(state, &match_record.match_info, winner_name).await;
+        agent_pipeline::cross_check_provider(state, &match_record.match_info, winner_name).await;
 
     // Confidence threshold gate
     let confidence_f64 = confidence
@@ -355,26 +277,6 @@ fn verify_webhook_signature(
     let provided_hex = provided.strip_prefix("sha256=").unwrap_or(provided);
     if !constant_time_eq(provided_hex.as_bytes(), expected.as_bytes()) {
         return Err(unauthorized("invalid webhook signature"));
-    }
-    Ok(())
-}
-
-/// PandaScore sends a static token in `X-PandaScore-Token`.
-fn verify_pandascore_token(headers: &HeaderMap) -> Result<(), (StatusCode, Json<ApiResponse<()>>)> {
-    let expected = std::env::var("PANDASCORE_WEBHOOK_TOKEN")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .ok_or_else(|| {
-            service_unavailable(
-                "pandascore webhook is not configured (PANDASCORE_WEBHOOK_TOKEN unset)",
-            )
-        })?;
-    let got = headers
-        .get("x-pandascore-token")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| unauthorized("missing X-PandaScore-Token header"))?;
-    if !constant_time_eq(got.as_bytes(), expected.as_bytes()) {
-        return Err(unauthorized("invalid PandaScore webhook token"));
     }
     Ok(())
 }

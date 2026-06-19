@@ -103,6 +103,7 @@ pub struct CreatedTournamentPool {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct TournamentPoolSnapshot {
     pub object_type: String,
     pub original_package_id: String,

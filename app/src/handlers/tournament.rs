@@ -90,22 +90,6 @@ pub async fn list_tournaments(
     Ok(Json(ApiResponse::ok(matches)))
 }
 
-pub async fn get_tournament_source_pandascore(
-    State(state): State<Arc<AppState>>,
-) -> AppResult<PandaScoreSourceResponse> {
-    let config = state.pandascore.config();
-    Ok(Json(ApiResponse::ok(PandaScoreSourceResponse {
-        provider: "pandascore".to_string(),
-        enabled: config.enabled,
-        configured: config.configured(),
-        base_url: config.base_url.clone(),
-        default_statuses: config.default_statuses.clone(),
-        default_videogame_slugs: config.default_videogame_slugs.clone(),
-        default_per_page: config.default_per_page,
-        default_max_pages: config.default_max_pages,
-    })))
-}
-
 pub async fn get_tournament_source_grid(
     State(state): State<Arc<AppState>>,
 ) -> AppResult<GridSourceResponse> {
@@ -117,11 +101,28 @@ pub async fn get_tournament_source_grid(
         base_url: config.base_url.clone(),
         matches_path: config.matches_path.clone(),
         auth_header: config.auth_header.clone(),
+        api_style: config.api_style.clone(),
         default_statuses: config.default_statuses.clone(),
         default_videogame_slugs: config.default_videogame_slugs.clone(),
         default_per_page: config.default_per_page,
         default_max_pages: config.default_max_pages,
     })))
+}
+
+pub async fn probe_grid_tournaments(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<GridSyncRequest>,
+) -> AppResult<GridProbeResponse> {
+    verify_admin(&headers)?;
+
+    let probe = state
+        .grid
+        .probe_matches(&req)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+
+    Ok(Json(ApiResponse::ok(probe)))
 }
 
 pub async fn sync_grid_tournaments(
@@ -160,7 +161,7 @@ pub async fn sync_grid_tournaments(
         }
 
         if match_req.pandascore_status.as_deref() == Some("finished") {
-            match resolve_finished_pandascore_match(&state, &match_record.id.to_string(), match_req)
+            match resolve_finished_provider_match(&state, &match_record.id.to_string(), match_req)
                 .await
             {
                 Ok(true) => resolved += 1,
@@ -184,70 +185,10 @@ pub async fn sync_grid_tournaments(
     })))
 }
 
-pub async fn sync_pandascore_tournaments(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    Json(req): Json<PandaScoreSyncRequest>,
-) -> AppResult<PandaScoreSyncResponse> {
-    verify_admin(&headers)?;
-
-    let fetched = state
-        .pandascore
-        .fetch_matches(&req)
-        .await
-        .map_err(|e| bad_request(e.to_string()))?;
-
-    let mut synced = 0usize;
-    let mut synced_incomplete = 0usize;
-    let skipped = 0usize;
-    let mut resolved = 0usize;
-    let mut errors = Vec::new();
-
-    for match_req in fetched.iter() {
-        let match_record = match state.db.upsert_match(match_req).await {
-            Ok(record) => record,
-            Err(e) => {
-                errors.push(format!(
-                    "failed to sync PandaScore match {}: {}",
-                    match_req.pandascore_id, e
-                ));
-                continue;
-            }
-        };
-        synced += 1;
-        if match_req.opponents.len() != 2 {
-            synced_incomplete += 1;
-        }
-
-        if match_req.pandascore_status.as_deref() == Some("finished") {
-            match resolve_finished_pandascore_match(&state, &match_record.id.to_string(), match_req)
-                .await
-            {
-                Ok(true) => resolved += 1,
-                Ok(false) => {}
-                Err(e) => errors.push(format!(
-                    "failed to resolve PandaScore match {}: {}",
-                    match_req.pandascore_id, e
-                )),
-            }
-        }
-    }
-
-    Ok(Json(ApiResponse::ok(PandaScoreSyncResponse {
-        provider: "pandascore".to_string(),
-        fetched: fetched.len(),
-        synced,
-        synced_incomplete,
-        skipped,
-        resolved,
-        errors,
-    })))
-}
-
 // ─── POST /api/tournaments ────────────────────────────────────────────────────
-/// Create or sync a tournament from PandaScore-shaped data.
-/// Server-side PandaScore sync should be preferred; this route remains useful
-/// for admin backfills and local development.
+/// Create or sync a tournament from provider-shaped data.
+/// Server-side GRID sync should be preferred; this route remains useful for
+/// admin backfills and local development.
 pub async fn create_tournament(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -296,7 +237,7 @@ pub async fn create_tournament(
         .ok_or_else(|| internal_error("Match not found after creation"))?;
 
     tracing::info!(
-        "Tournament synced: {} (PandaScore ID: {})",
+        "Tournament synced: {} (provider ID: {})",
         req.name,
         req.pandascore_id
     );
@@ -304,7 +245,7 @@ pub async fn create_tournament(
     Ok(Json(ApiResponse::ok(match_with_odds)))
 }
 
-async fn resolve_finished_pandascore_match(
+async fn resolve_finished_provider_match(
     state: &Arc<AppState>,
     match_id: &str,
     req: &CreateMatchRequest,
@@ -321,7 +262,7 @@ async fn resolve_finished_pandascore_match(
         .get_match_with_odds(match_id)
         .await
         .map_err(|e| e.to_string())?
-        .ok_or_else(|| "match not found after PandaScore sync".to_string())?;
+        .ok_or_else(|| "match not found after provider sync".to_string())?;
 
     let Some(winner) = match_data
         .opponents
@@ -1094,7 +1035,7 @@ pub async fn resolve_tournament(
         .resolve_match(
             &match_id,
             &req.winner_opponent_id,
-            req.pandascore_winner_id,
+            req.provider_winner_id,
             req.forfeit.unwrap_or(false),
         )
         .await
@@ -1135,7 +1076,7 @@ pub async fn cancel_tournament(
 }
 
 // ─── POST /api/tournaments/:id/sync ───────────────────────────────────────────
-/// Sync tournament status from PandaScore (frontend pushes update)
+/// Sync tournament status from provider/admin data.
 pub async fn sync_tournament(
     State(state): State<Arc<AppState>>,
     Path(match_id): Path<String>,
@@ -1155,7 +1096,7 @@ pub async fn sync_tournament(
     if req.pandascore_status.as_deref() == Some("finished") {
         if let Some(raw_data) = &req.raw_data {
             if let Some(winner_id) = raw_data.get("winner_id").and_then(|v| v.as_i64()) {
-                // Find opponent with this PandaScore ID
+                // Find opponent with this provider ID.
                 let match_data = state.db.get_match_with_odds(&match_id).await.ok().flatten();
                 if let Some(m) = match_data {
                     let winner_opponent = m

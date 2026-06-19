@@ -1,14 +1,14 @@
 -- migrations/009_create_matches.sql
--- Esports matches from PandaScore (the betting events)
--- Note: We call them "matches" to align with PandaScore terminology
+-- Esports matches from the configured data provider (the betting events)
+-- Note: We call them "matches" to align with provider terminology
 -- but display them as "Tournaments" in the UI
 
 CREATE TABLE IF NOT EXISTS matches (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     
-    -- PandaScore identifiers
-    pandascore_id       BIGINT UNIQUE,                -- PandaScore match ID
-    slug                VARCHAR(256),                 -- PandaScore slug
+    -- Provider identifiers. Column names are legacy from the original provider.
+    pandascore_id       BIGINT UNIQUE,                -- Provider match ID
+    slug                VARCHAR(256),                 -- Provider slug
     
     -- Match info
     name                VARCHAR(512) NOT NULL,        -- e.g., "T1 vs Gen.G"
@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS matches (
     match_type          VARCHAR(50),                  -- e.g., "best_of"
     number_of_games     INTEGER,                      -- e.g., 3 for best of 3
     
-    -- Match status (from PandaScore)
+    -- Match status from the configured provider
     -- not_started, running, finished, canceled, postponed
     pandascore_status   VARCHAR(30) DEFAULT 'not_started',
     
@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS matches (
     status              VARCHAR(30) DEFAULT 'upcoming',
     
     -- Winner info (set when match finishes)
-    winner_id           INTEGER,                      -- PandaScore team/player ID
+    winner_id           INTEGER,                      -- Provider team/player ID
     winner_type         VARCHAR(20),                  -- "Team" or "Player"
     forfeit             BOOLEAN DEFAULT FALSE,
     
@@ -66,7 +66,7 @@ CREATE TABLE IF NOT EXISTS matches (
     -- Detailed stats available?
     detailed_stats      BOOLEAN DEFAULT FALSE,
     
-    -- Full PandaScore response for reference
+    -- Full provider response for reference
     raw_data            JSONB,
     
     -- Timestamps

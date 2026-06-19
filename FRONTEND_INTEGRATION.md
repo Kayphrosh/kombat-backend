@@ -263,14 +263,18 @@ List and filter tournaments:
 
 ```http
 GET /api/tournaments
+GET /api/tournaments
 GET /api/tournaments?status=upcoming&videogame=codm&pool_configured=true&search=final&limit=20&offset=0
+GET /api/tournaments?tournament_id=12345&status=all&limit=100
 GET /api/tournaments?tournament_id=12345&status=all&limit=100
 GET /api/tournaments/:id
 ```
 
 When `status` is omitted, the backend returns the current feed only: `upcoming` and `live` matches. `status=active` is also accepted as an alias for that current feed. Completed/history rows are returned only when requested explicitly with `status=completed`, `status=finished`, or `status=past`.
 
-For a real tournament detail/bracket view, query by PandaScore `tournament_id` or `tournament_slug`. Use `status=all` when the frontend needs every synced match in that tournament, including completed matches and upcoming matches that are not stakeable yet. Matches with fewer than two known opponents can be displayed for schedule/bracket context, but they will have `pool_configured: false` and should not show stake entry points.
+When `source` is omitted, the backend returns GRID rows only. Use `source=all` only for admin/debug views that need legacy provider rows.
+
+For a real tournament detail/bracket view, query by provider `tournament_id` or `tournament_slug`. Use `status=all` when the frontend needs every synced match in that tournament, including completed matches and upcoming matches that are not stakeable yet. Matches with fewer than two known opponents can be displayed for schedule/bracket context, but they will have `pool_configured: false` and should not show stake entry points.
 
 The `MatchWithOdds` response contains:
 
@@ -283,8 +287,10 @@ The `MatchWithOdds` response contains:
 Only show on-chain stake entry points for matches where `pool_configured === true`.
 
 GRID source metadata:
+GRID source metadata:
 
 ```http
+GET /api/tournaments/source/grid
 GET /api/tournaments/source/grid
 ```
 
@@ -669,7 +675,7 @@ GET /api/wagers/:address/artifacts
 
 ## 12. Organizer Dashboard
 
-The organizer dashboard unlocks community/CODM tournaments that are not available on PandaScore.
+The organizer dashboard unlocks community/CODM tournaments that are not available on GRID.
 
 Apply:
 
@@ -782,7 +788,7 @@ Required organizer details in UI:
 - Team names and optional team logos.
 - Rules, bracket, and evidence files when available.
 - Stream links.
-- Outcome source policy: organizer, agent, PandaScore, or admin review.
+- Outcome source policy: organizer, agent, GRID, or admin review.
 
 Upload team logos/files first with `/api/uploads`, then pass the returned URL as `image_url` or store larger artifacts on Walrus.
 
@@ -994,19 +1000,15 @@ POST /api/outcome-proposals/:id/review
 GRID sync:
 
 ```http
-POST /api/tournaments/source/grid/sync
+POST /api/tournaments/source/pandascore/sync
 X-Admin-Token: <server-only>
 {
-  "statuses": ["upcoming", "running"],
-  "videogame_slugs": ["valorant", "lol", "csgo", "dota2"],
-  "tournament_id": "optional-grid-tournament-id",
-  "tournament_slug": "optional-grid-tournament-slug",
-  "max_pages": 3,
-  "per_page": 100
+  "statuses": ["not_started", "running", "finished"],
+  "videogame_slugs": ["valorant", "codm"],
+  "max_pages": 2,
+  "per_page": 50
 }
 ```
-
-Use GRID statuses configured for your GRID account. The sync stores incomplete matches too, so `synced_incomplete` means the match is visible for schedule/bracket context but does not yet have exactly two known opponents for staking.
 
 Resolve/cancel/sync:
 
@@ -1025,9 +1027,6 @@ These are backend/server-only. The frontend should not call them.
 ```http
 POST /api/webhooks/match-result
 X-Webhook-Signature: hex(HMAC-SHA256(WEBHOOK_SECRET, raw_body))
-
-POST /api/webhooks/pandascore
-X-PandaScore-Token: <server-only>
 ```
 
 ## 19. Transaction Builder Notes For Sui
@@ -1092,11 +1091,11 @@ X-Admin-Token: <AUTH_ADMIN_TOKEN>
 
 The response lists each attempted match, the created `pool_object_id`, transaction digest, or the per-match failure reason.
 
-PandaScore sync/backfill payloads may also include `sui_network` and `sui_pool_object_id`; ordinary syncs preserve any existing pool object when those fields are omitted.
+Provider sync/backfill payloads may also include `sui_network` and `sui_pool_object_id`; ordinary syncs preserve any existing pool object when those fields are omitted.
 
 ## 20. Security Checklist For FE
 
-- Never expose `AUTH_ADMIN_TOKEN`, `AGENT_API_TOKEN`, `WEBHOOK_SECRET`, `GRID_API_KEY`, `PANDASCORE_API_KEY`, private Sui keys, or database URLs.
+- Never expose `AUTH_ADMIN_TOKEN`, `AGENT_API_TOKEN`, `WEBHOOK_SECRET`, `PANDASCORE_API_KEY`, private Sui keys, or database URLs.
 - Always compare authenticated wallet with the connected Dynamic wallet before rendering protected user actions.
 - Only call user-protected routes with the app JWT from `/api/auth/verify`.
 - Do not let users submit arbitrary `owner_wallet` on Walrus uploads unless it matches the connected wallet.

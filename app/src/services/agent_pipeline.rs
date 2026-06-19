@@ -1,13 +1,12 @@
 //! Shared logic for the outcome-proposal pipeline used by the agent submission
-//! endpoint, the result webhooks, and the PandaScore poller.
+//! endpoint and result webhooks.
 //!
-//! These helpers were previously duplicated across `handlers/agent.rs`,
-//! `handlers/webhook.rs`, and `services/poller.rs`. Centralising them keeps the
-//! evidence rules, epoch pinning, and PandaScore cross-check consistent.
+//! These helpers were previously duplicated across handlers. Centralising them
+//! keeps the evidence rules, epoch pinning, and verification gates consistent.
 
 use serde_json::Value;
 
-use crate::{services::pandascore::result_from_match, state::AppState};
+use crate::state::AppState;
 
 /// Default minimum confidence for a proposal to be auto-accepted without review.
 pub const DEFAULT_MIN_AUTO_ACCEPT_CONFIDENCE: f64 = 0.80;
@@ -65,70 +64,27 @@ pub fn gate_status(verification_status: &str, confidence: f64, min_confidence: f
     }
 }
 
-/// Cross-check a proposed winner against PandaScore's reported result.
-/// Returns `(verification_status, note)` where status is either
-/// `"auto_verified"` (PandaScore confirms the winner) or `"pending_review"`.
-pub async fn cross_check_pandascore(
+/// Cross-check a proposed winner against the configured provider's reported
+/// result. GRID result verification is intentionally conservative until the
+/// exact result endpoint/payload is confirmed.
+pub async fn cross_check_provider(
     state: &AppState,
     match_info: &crate::models::MatchRecord,
     winner_name: &str,
 ) -> (String, String) {
-    let pandascore_id = match match_info.pandascore_id {
-        Some(id) => id,
-        None => {
-            return (
-                "pending_review".to_string(),
-                "No PandaScore ID on match; manual review required".to_string(),
-            )
-        }
-    };
-
-    if !state.pandascore.config().configured() {
+    let _ = (state, winner_name);
+    if match_info.source == "grid" {
         return (
             "pending_review".to_string(),
-            "PandaScore not configured; manual review required".to_string(),
+            "GRID result cross-check is not configured yet; manual review required".to_string(),
         );
     }
 
-    let raw_match = match state.pandascore.fetch_match_by_id(pandascore_id).await {
-        Ok(m) => m,
-        Err(e) => {
-            return (
-                "pending_review".to_string(),
-                format!("PandaScore lookup failed: {}; manual review required", e),
-            )
-        }
-    };
-
-    let ps_result = result_from_match(&raw_match);
-
-    if !ps_result.finished {
-        return (
-            "pending_review".to_string(),
-            "PandaScore reports match not yet finished".to_string(),
-        );
-    }
-
-    let ps_winner_name = ps_result.winner_name.as_deref().unwrap_or("");
-    if ps_winner_name.is_empty() {
-        return (
-            "pending_review".to_string(),
-            "PandaScore returned no winner; manual review required".to_string(),
-        );
-    }
-
-    if !winner_name.is_empty() && winner_name.eq_ignore_ascii_case(ps_winner_name) {
-        (
-            "auto_verified".to_string(),
-            format!("PandaScore confirmed winner: {}", ps_winner_name),
-        )
-    } else {
-        (
-            "pending_review".to_string(),
-            format!(
-                "PandaScore winner '{}' does not match proposed '{}'; manual review required",
-                ps_winner_name, winner_name
-            ),
-        )
-    }
+    (
+        "pending_review".to_string(),
+        format!(
+            "Provider '{}' result cross-check is not configured; manual review required",
+            match_info.source
+        ),
+    )
 }

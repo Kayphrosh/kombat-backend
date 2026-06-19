@@ -47,11 +47,10 @@ use handlers::sui::{
 use handlers::tournament::{
     backfill_tournament_pools, calculate_payout, cancel_tournament, configure_tournament_pool,
     create_organizer_match, create_organizer_tournament, create_outcome_proposal,
-    create_tournament, get_tournament, get_tournament_source_grid,
-    get_tournament_source_pandascore, get_user_stake_stats, get_user_stakes,
-    list_organizer_tournaments, list_outcome_proposals, list_tournament_stakes, list_tournaments,
-    place_stake, resolve_tournament, review_outcome_proposal, sync_grid_tournaments,
-    sync_pandascore_tournaments, sync_tournament, sync_tournament_stakes,
+    create_tournament, get_tournament, get_tournament_source_grid, get_user_stake_stats,
+    get_user_stakes, list_organizer_tournaments, list_outcome_proposals, list_tournament_stakes,
+    list_tournaments, place_stake, probe_grid_tournaments, resolve_tournament,
+    review_outcome_proposal, sync_grid_tournaments, sync_tournament, sync_tournament_stakes,
 };
 use handlers::transak::{create_transak_widget_url, get_transak_config, get_transak_quote};
 use handlers::upload::upload_file;
@@ -68,11 +67,11 @@ use handlers::wager::{
 use handlers::walrus::{
     create_walrus_artifact, get_walrus_artifact, get_walrus_blob_url, get_walrus_config,
 };
-use handlers::webhook::{handle_match_result_webhook, handle_pandascore_webhook};
+use handlers::webhook::handle_match_result_webhook;
 use prometheus::{Encoder, IntCounter, TextEncoder};
 use services::{
-    DbService, GridConfig, GridService, PandaScoreConfig, PandaScoreService, RampConfig,
-    RampService, SuiConfig, SuiService, TransakConfig, TransakService, WalrusConfig, WalrusService,
+    DbService, GridConfig, GridService, RampConfig, RampService, SuiConfig, SuiService,
+    TransakConfig, TransakService, WalrusConfig, WalrusService,
 };
 use state::AppState;
 
@@ -140,15 +139,6 @@ async fn main() -> anyhow::Result<()> {
     );
     let grid = Arc::new(GridService::new(grid_config));
 
-    let pandascore_config = PandaScoreConfig::from_env();
-    tracing::info!(
-        "Configuring PandaScore: enabled={}, configured={}, base_url={}",
-        pandascore_config.enabled,
-        pandascore_config.configured(),
-        pandascore_config.base_url
-    );
-    let pandascore = Arc::new(PandaScoreService::new(pandascore_config));
-
     let walrus_config = WalrusConfig::from_env();
     tracing::info!(
         "Configuring Walrus: enabled={}, configured={}, network={}",
@@ -204,7 +194,6 @@ async fn main() -> anyhow::Result<()> {
         ramp,
         transak,
         grid,
-        pandascore,
         walrus,
         notif_tx: Arc::new(notif_tx),
         dynamic_service,
@@ -346,12 +335,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/admin/agent-runs", get(list_admin_agent_runs))
         .route("/api/admin/agent-runs/:id", get(get_admin_agent_run))
-        // ── Webhooks (organizer systems + PandaScore) ────────────────────────
+        // ── Webhooks (organizer systems) ─────────────────────────────────────
         .route(
             "/api/webhooks/match-result",
             post(handle_match_result_webhook),
         )
-        .route("/api/webhooks/pandascore", post(handle_pandascore_webhook))
         // ── P2P wagers (1-v-1) ───────────────────────────────────────────────
         .route("/api/wagers", get(list_wagers).post(create_wager))
         .route("/api/wagers/mine", get(list_my_wagers))
@@ -376,12 +364,16 @@ async fn main() -> anyhow::Result<()> {
             get(list_tournaments).post(create_tournament),
         )
         .route(
-            "/api/tournaments/source/pandascore",
-            get(get_tournament_source_pandascore),
+            "/api/tournaments/source/grid",
+            get(get_tournament_source_grid),
         )
         .route(
-            "/api/tournaments/source/pandascore/sync",
-            post(sync_pandascore_tournaments),
+            "/api/tournaments/source/grid/probe",
+            post(probe_grid_tournaments),
+        )
+        .route(
+            "/api/tournaments/source/grid/sync",
+            post(sync_grid_tournaments),
         )
         .route(
             "/api/tournaments/source/grid",
@@ -458,10 +450,6 @@ async fn main() -> anyhow::Result<()> {
         app = app.nest_service("/uploads", ServeDir::new(upload_dir));
     }
 
-    // ── Start background poller ───────────────────────────────────────────────
-    let poller_config = services::poller::PollerConfig::from_env();
-    services::poller::spawn(state, poller_config);
-
     // ── Start server ──────────────────────────────────────────────────────────
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     tracing::info!("Wager API listening on {}", addr);
@@ -500,6 +488,7 @@ async fn health_handler(
             "configured": grid.configured(),
             "base_url": grid.base_url.clone(),
             "matches_path": grid.matches_path.clone(),
+            "api_style": grid.api_style.clone(),
         },
         "sui": {
             "active_network": sui.active_network.clone(),

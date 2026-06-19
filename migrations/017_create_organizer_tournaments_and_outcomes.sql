@@ -1,5 +1,5 @@
 -- Organizer-created tournaments and verifiable outcome proposals.
--- This lets Kombat support games/events outside PandaScore while preserving
+-- This lets Kombat support games/events outside the provider feed while preserving
 -- matches as the stakeable market primitive.
 
 CREATE TABLE IF NOT EXISTS organizer_tournaments (
@@ -28,7 +28,7 @@ CREATE INDEX IF NOT EXISTS idx_organizer_tournaments_game
     ON organizer_tournaments(videogame_slug);
 
 ALTER TABLE matches
-    ADD COLUMN IF NOT EXISTS source VARCHAR(30) NOT NULL DEFAULT 'pandascore',
+    ADD COLUMN IF NOT EXISTS source VARCHAR(30) NOT NULL DEFAULT 'grid',
     ADD COLUMN IF NOT EXISTS organizer_tournament_id UUID REFERENCES organizer_tournaments(id) ON DELETE SET NULL,
     ADD COLUMN IF NOT EXISTS organizer_wallet TEXT,
     ADD COLUMN IF NOT EXISTS result_status VARCHAR(30) NOT NULL DEFAULT 'pending',
