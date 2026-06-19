@@ -5,6 +5,7 @@ pub mod auth;
 mod auth_tests;
 pub mod db;
 pub mod dynamic;
+pub mod grid;
 pub mod pandascore;
 pub mod poller;
 pub mod push;
@@ -17,6 +18,7 @@ pub mod walrus;
 
 pub use db::DbService;
 pub use dynamic::DynamicService;
+pub use grid::{GridConfig, GridService};
 pub use pandascore::{PandaScoreConfig, PandaScoreService};
 pub use ramp::{RampConfig, RampService};
 pub use sui::{SuiConfig, SuiService};
