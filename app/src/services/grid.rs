@@ -437,13 +437,43 @@ impl GridService {
 }
 
 fn default_graphql_query() -> String {
+    // GRID Open Access "Central Data" schema: matches are exposed as `allSeries`.
     r#"
-query KombatGridMatches {
-  matches {
+query KombatGridSeries(
+  $first: Int!
+  $filter: SeriesFilter
+  $orderBy: SeriesOrderBy
+  $orderDirection: OrderDirection
+) {
+  allSeries(
+    first: $first
+    filter: $filter
+    orderBy: $orderBy
+    orderDirection: $orderDirection
+  ) {
+    totalCount
     edges {
       node {
         id
-        name
+        type
+        startTimeScheduled
+        title {
+          id
+          name
+          nameShortened
+        }
+        tournament {
+          id
+          name
+        }
+        teams {
+          baseInfo {
+            id
+            name
+            nameShortened
+            logoUrl
+          }
+        }
       }
     }
   }
@@ -453,19 +483,42 @@ query KombatGridMatches {
 }
 
 fn graphql_variables(req: &GridSyncRequest, config: &GridConfig, per_page: u32) -> Value {
-    let statuses = normalized_status_filters(req, &config.default_statuses);
     let videogame_slugs = normalized_videogame_filters(req, &config.default_videogame_slugs);
+    let title_ids = videogame_slugs
+        .iter()
+        .filter_map(|slug| videogame_slug_to_title_id(slug))
+        .map(|id| id.to_string())
+        .collect::<Vec<_>>();
+
+    let mut filter = serde_json::Map::new();
+    if !title_ids.is_empty() {
+        filter.insert("titleIds".to_string(), json!({ "in": title_ids }));
+    }
+    if let Some(id) = req.tournament_id.as_deref() {
+        filter.insert("tournamentId".to_string(), json!(id));
+    }
+    // Open Access is timeframe-based; pull series from the recent past onward so we
+    // catch both upcoming fixtures and matches that are already live.
+    let window_start = (chrono::Utc::now() - chrono::Duration::hours(12)).to_rfc3339();
+    filter.insert("startTimeScheduled".to_string(), json!({ "gte": window_start }));
 
     json!({
         "first": per_page,
-        "limit": per_page,
-        "statuses": statuses,
-        "status": statuses.first().cloned(),
-        "videogameSlugs": videogame_slugs,
-        "videogameSlug": videogame_slugs.first().cloned(),
-        "tournamentId": req.tournament_id.as_deref(),
-        "tournamentSlug": req.tournament_slug.as_deref(),
+        "filter": Value::Object(filter),
+        "orderBy": "StartTimeScheduled",
+        "orderDirection": "ASC",
     })
+}
+
+/// Maps the videogame slugs we configure to GRID Central Data `titleId`s.
+/// Only the titles licensed under the current Open Access key are mapped.
+fn videogame_slug_to_title_id(slug: &str) -> Option<u32> {
+    match slug.trim().to_ascii_lowercase().as_str() {
+        "csgo" | "cs:go" | "counter-strike" => Some(1),
+        "dota" | "dota2" | "dota-2" => Some(2),
+        "cs2" | "counter-strike-2" => Some(28),
+        _ => None,
+    }
 }
 
 fn normalized_status_filters(req: &GridSyncRequest, defaults: &[String]) -> Vec<String> {
@@ -530,6 +583,25 @@ fn grid_match_from_value(raw: Value) -> Option<CreateMatchRequest> {
     let opponents = opponents_from_value(&raw);
     let raw_data = with_provider_metadata(raw, &external_id);
 
+    // Build a human-readable "A vs B" name when the provider doesn't supply one
+    // (GRID Central Data series have no `name` field).
+    let derived_name = match opponents.as_slice() {
+        [a, b, ..] => Some(format!("{} vs {}", a.name, b.name)),
+        _ => None,
+    };
+
+    let scheduled_at = string_at_any(
+        &raw_data,
+        &[
+            &["scheduled_at"],
+            &["scheduledAt"],
+            &["startTimeScheduled"],
+            &["start_time"],
+            &["startTime"],
+            &["startDate"],
+        ],
+    );
+
     Some(CreateMatchRequest {
         pandascore_id: provider_numeric_id,
         slug: string_at_any(
@@ -540,12 +612,12 @@ fn grid_match_from_value(raw: Value) -> Option<CreateMatchRequest> {
             &raw_data,
             &[
                 &["name"],
-                &["title"],
                 &["match", "name"],
                 &["data", "name"],
                 &["fixture", "name"],
             ],
         )
+        .or(derived_name)
         .unwrap_or_else(|| format!("GRID match {}", external_id)),
         videogame_id: i32_at_any(&raw_data, &[&["videogame", "id"], &["game", "id"]]),
         videogame_name: string_at_any(
@@ -562,6 +634,7 @@ fn grid_match_from_value(raw: Value) -> Option<CreateMatchRequest> {
                 &["videogame", "slug"],
                 &["game", "slug"],
                 &["title", "slug"],
+                &["title", "nameShortened"],
                 &["game", "key"],
             ],
         ),
@@ -598,16 +671,7 @@ fn grid_match_from_value(raw: Value) -> Option<CreateMatchRequest> {
         tournament_id: i32_at_any(&raw_data, &[&["tournament", "id"], &["stage", "id"]]),
         tournament_name: string_at_any(&raw_data, &[&["tournament", "name"], &["stage", "name"]]),
         tournament_slug: string_at_any(&raw_data, &[&["tournament", "slug"], &["stage", "slug"]]),
-        scheduled_at: string_at_any(
-            &raw_data,
-            &[
-                &["scheduled_at"],
-                &["scheduledAt"],
-                &["start_time"],
-                &["startTime"],
-                &["startDate"],
-            ],
-        ),
+        scheduled_at: scheduled_at.clone(),
         begin_at: string_at_any(
             &raw_data,
             &[&["begin_at"], &["beginAt"], &["started_at"], &["startedAt"]],
@@ -629,8 +693,11 @@ fn grid_match_from_value(raw: Value) -> Option<CreateMatchRequest> {
                 &["bestOf"],
             ],
         ),
+        // GRID Central Data exposes no live match state, so fall back to deriving
+        // the status from the scheduled start time when no explicit field is present.
         pandascore_status: string_at_any(&raw_data, &[&["status"], &["state"]])
-            .map(|status| normalize_status(&status)),
+            .map(|status| normalize_status(&status))
+            .or_else(|| derive_status_from_schedule(scheduled_at.as_deref())),
         opponents,
         streams_list: raw_data.get("streams_list").cloned(),
         raw_data: Some(raw_data),
@@ -669,6 +736,7 @@ fn opponent_from_value(raw: &Value) -> Option<CreateOpponentRequest> {
     let id = string_or_number_at_any(
         raw,
         &[
+            &["baseInfo", "id"],
             &["opponent", "id"],
             &["team", "id"],
             &["participant", "id"],
@@ -679,6 +747,7 @@ fn opponent_from_value(raw: &Value) -> Option<CreateOpponentRequest> {
     let name = string_at_any(
         raw,
         &[
+            &["baseInfo", "name"],
             &["opponent", "name"],
             &["team", "name"],
             &["participant", "name"],
@@ -694,8 +763,24 @@ fn opponent_from_value(raw: &Value) -> Option<CreateOpponentRequest> {
         opponent_type: string_at_any(raw, &[&["type"], &["opponent_type"], &["kind"]])
             .unwrap_or_else(|| "Team".to_string()),
         name,
-        acronym: string_at_any(raw, &[&["acronym"], &["shortName"], &["abbreviation"]]),
-        image_url: string_at_any(raw, &[&["image_url"], &["imageUrl"], &["logoUrl"]]),
+        acronym: string_at_any(
+            raw,
+            &[
+                &["baseInfo", "nameShortened"],
+                &["acronym"],
+                &["shortName"],
+                &["abbreviation"],
+            ],
+        ),
+        image_url: string_at_any(
+            raw,
+            &[
+                &["baseInfo", "logoUrl"],
+                &["image_url"],
+                &["imageUrl"],
+                &["logoUrl"],
+            ],
+        ),
         location: string_at_any(raw, &[&["location"], &["country"], &["region"]]),
     })
 }
@@ -708,10 +793,14 @@ fn extract_items(value: &Value) -> Vec<Value> {
     for path in [
         &["data"][..],
         &["matches"][..],
+        &["allSeries"][..],
+        &["series"][..],
         &["items"][..],
         &["results"][..],
         &["nodes"][..],
         &["data", "matches"][..],
+        &["data", "allSeries"][..],
+        &["data", "series"][..],
         &["data", "items"][..],
         &["data", "results"][..],
         &["data", "nodes"][..],
@@ -725,6 +814,9 @@ fn extract_items(value: &Value) -> Vec<Value> {
         &["edges"][..],
         &["data", "edges"][..],
         &["data", "matches", "edges"][..],
+        &["data", "allSeries", "edges"][..],
+        &["data", "series", "edges"][..],
+        &["allSeries", "edges"][..],
         &["data", "items", "edges"][..],
     ] {
         if let Some(items) = value_at(value, path).and_then(Value::as_array) {
@@ -752,6 +844,19 @@ fn with_provider_metadata(mut raw: Value, external_id: &str) -> Value {
         obj.insert("grid_external_id".to_string(), json!(external_id));
     }
     raw
+}
+
+/// GRID Central Data does not return a live match state. Approximate one from the
+/// scheduled start time: future fixtures are `not_started`, anything that has
+/// already started is treated as `running`.
+fn derive_status_from_schedule(scheduled_at: Option<&str>) -> Option<String> {
+    let scheduled = scheduled_at?;
+    let start = chrono::DateTime::parse_from_rfc3339(scheduled).ok()?;
+    if start > chrono::Utc::now() {
+        Some("not_started".to_string())
+    } else {
+        Some("running".to_string())
+    }
 }
 
 fn normalize_status(status: &str) -> String {
@@ -900,5 +1005,57 @@ mod tests {
         assert_eq!(parsed.name, "Gamma vs Delta");
         assert_eq!(parsed.pandascore_status.as_deref(), Some("running"));
         assert_eq!(parsed.opponents.len(), 2);
+    }
+
+    #[test]
+    fn parses_grid_central_data_series_payload() {
+        // Mirrors the real GRID Open Access `allSeries` response shape: no top-level
+        // `name`/`status`, nested `title.nameShortened` and `teams[].baseInfo`.
+        let raw = serde_json::json!({
+            "data": {
+                "allSeries": {
+                    "edges": [
+                        {
+                            "node": {
+                                "id": "2949156",
+                                "startTimeScheduled": "2999-01-01T08:00:00Z",
+                                "title": { "id": "28", "name": "Counter Strike 2", "nameShortened": "cs2" },
+                                "tournament": { "id": "55", "name": "CCT 2026 Europe Series 4" },
+                                "teams": [
+                                    { "baseInfo": { "id": "910", "name": "Team Nemesis", "nameShortened": "NEM", "logoUrl": "https://cdn.grid.gg/nem.png" } },
+                                    { "baseInfo": { "id": "911", "name": "Team TDK", "nameShortened": "TDK" } }
+                                ]
+                            }
+                        }
+                    ]
+                }
+            }
+        });
+
+        let items = extract_items(&raw);
+        assert_eq!(items.len(), 1);
+        let parsed = grid_match_from_value(items[0].clone()).expect("series should parse");
+        assert_eq!(parsed.source.as_deref(), Some("grid"));
+        assert_eq!(parsed.name, "Team Nemesis vs Team TDK");
+        assert_eq!(parsed.videogame_slug.as_deref(), Some("cs2"));
+        assert_eq!(parsed.tournament_name.as_deref(), Some("CCT 2026 Europe Series 4"));
+        // Future start time -> derived not_started status.
+        assert_eq!(parsed.pandascore_status.as_deref(), Some("not_started"));
+        assert_eq!(parsed.opponents.len(), 2);
+        assert_eq!(parsed.opponents[0].name, "Team Nemesis");
+        assert_eq!(parsed.opponents[0].acronym.as_deref(), Some("NEM"));
+        assert_eq!(
+            parsed.opponents[0].image_url.as_deref(),
+            Some("https://cdn.grid.gg/nem.png")
+        );
+    }
+
+    #[test]
+    fn maps_open_access_slugs_to_title_ids() {
+        assert_eq!(videogame_slug_to_title_id("csgo"), Some(1));
+        assert_eq!(videogame_slug_to_title_id("dota"), Some(2));
+        assert_eq!(videogame_slug_to_title_id("dota2"), Some(2));
+        assert_eq!(videogame_slug_to_title_id("cs2"), Some(28));
+        assert_eq!(videogame_slug_to_title_id("valorant"), None);
     }
 }

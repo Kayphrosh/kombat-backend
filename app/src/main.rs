@@ -47,10 +47,12 @@ use handlers::sui::{
 use handlers::tournament::{
     backfill_tournament_pools, calculate_payout, cancel_tournament, configure_tournament_pool,
     create_organizer_match, create_organizer_tournament, create_outcome_proposal,
-    create_tournament, get_tournament, get_tournament_source_grid, get_user_stake_stats,
-    get_user_stakes, list_organizer_tournaments, list_outcome_proposals, list_tournament_stakes,
-    list_tournaments, place_stake, probe_grid_tournaments, resolve_tournament,
-    review_outcome_proposal, sync_grid_tournaments, sync_tournament, sync_tournament_stakes,
+    create_tournament, get_tournament, get_tournament_source_grid,
+    get_tournament_source_pandascore, get_user_stake_stats, get_user_stakes,
+    list_organizer_tournaments, list_outcome_proposals, list_tournament_stakes, list_tournaments,
+    place_stake, probe_grid_tournaments, probe_pandascore_tournaments, resolve_tournament,
+    review_outcome_proposal, sync_grid_tournaments, sync_pandascore_tournaments, sync_tournament,
+    sync_tournament_stakes,
 };
 use handlers::transak::{create_transak_widget_url, get_transak_config, get_transak_quote};
 use handlers::upload::upload_file;
@@ -70,8 +72,8 @@ use handlers::walrus::{
 use handlers::webhook::handle_match_result_webhook;
 use prometheus::{Encoder, IntCounter, TextEncoder};
 use services::{
-    DbService, GridConfig, GridService, RampConfig, RampService, SuiConfig, SuiService,
-    TransakConfig, TransakService, WalrusConfig, WalrusService,
+    DbService, GridConfig, GridService, PandascoreConfig, PandascoreService, RampConfig,
+    RampService, SuiConfig, SuiService, TransakConfig, TransakService, WalrusConfig, WalrusService,
 };
 use state::AppState;
 
@@ -139,6 +141,15 @@ async fn main() -> anyhow::Result<()> {
     );
     let grid = Arc::new(GridService::new(grid_config));
 
+    let pandascore_config = PandascoreConfig::from_env();
+    tracing::info!(
+        "Configuring PandaScore: enabled={}, configured={}, base_url={}",
+        pandascore_config.enabled,
+        pandascore_config.configured(),
+        pandascore_config.base_url,
+    );
+    let pandascore = Arc::new(PandascoreService::new(pandascore_config));
+
     let walrus_config = WalrusConfig::from_env();
     tracing::info!(
         "Configuring Walrus: enabled={}, configured={}, network={}",
@@ -194,6 +205,7 @@ async fn main() -> anyhow::Result<()> {
         ramp,
         transak,
         grid,
+        pandascore,
         walrus,
         notif_tx: Arc::new(notif_tx),
         dynamic_service,
@@ -374,6 +386,18 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/tournaments/source/grid/sync",
             post(sync_grid_tournaments),
+        )
+        .route(
+            "/api/tournaments/source/pandascore",
+            get(get_tournament_source_pandascore),
+        )
+        .route(
+            "/api/tournaments/source/pandascore/probe",
+            post(probe_pandascore_tournaments),
+        )
+        .route(
+            "/api/tournaments/source/pandascore/sync",
+            post(sync_pandascore_tournaments),
         )
         .route("/api/tournaments/:id", get(get_tournament))
         .route(

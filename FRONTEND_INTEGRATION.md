@@ -1133,3 +1133,143 @@ These are non-production test values from the current Railway/local smoke test:
 - Testnet Sui package: `0xeb9b807853b4a3e440c9dc6e988bfee06886b5177bbe297083e79afb97edc160`
 
 Use these only to validate screen wiring while the real FE data flows are being built.
+
+---
+
+## 23. PandaScore Integration (New — June 2026)
+
+PandaScore is now the **primary match data source**. It replaces GRID as the default provider for the match lobby and covers 15 esports titles including LoL, Valorant, R6, CoD, Overwatch, Rocket League, and more.
+
+### What changed for the FE
+
+The `GET /api/tournaments` response is identical — the FE sees the same `MatchWithOdds` shape regardless of provider. The only visible difference is `match_info.source` will be `"pandascore"` instead of `"grid"` on new rows.
+
+**No FE code changes are required to display PandaScore matches.** The integration is entirely server-side.
+
+### Supported game slugs (PandaScore)
+
+Use these values in `videogame_slug` query params on `/api/tournaments`:
+
+| Game | `videogame_slug` |
+|------|-----------------|
+| Counter-Strike (CS:GO) | `cs-go` |
+| Dota 2 | `dota-2` |
+| League of Legends | `league-of-legends` |
+| Valorant | `valorant` |
+| Rainbow Six Siege | `r6-siege` |
+| Call of Duty | `cod-mw` |
+| Overwatch | `ow` |
+| Rocket League | `rl` |
+| PUBG | `pubg` |
+| King of Glory | `kog` |
+| Mobile Legends | `mlbb` |
+| LoL Wild Rift | `lol-wild-rift` |
+| StarCraft 2 | `starcraft-2` |
+| EA Sports FC | `fifa` |
+
+### Admin: trigger a PandaScore sync
+
+Run this from the admin dashboard or a cron job (suggested every 30 minutes):
+
+```http
+POST /api/tournaments/source/pandascore/sync
+X-Admin-Token: <AUTH_ADMIN_TOKEN>
+Content-Type: application/json
+
+{
+  "statuses": ["upcoming", "running"],
+  "videogame_slugs": ["cs-go", "valorant", "dota-2", "r6-siege", "ow", "cod-mw", "rl", "league-of-legends"],
+  "per_page": 50,
+  "max_pages": 5
+}
+```
+
+All fields are optional — omit them to use `.env` defaults.
+
+Response:
+
+```json
+{
+  "provider": "pandascore",
+  "fetched": 87,
+  "synced": 87,
+  "synced_incomplete": 2,
+  "skipped": 0,
+  "resolved": 3,
+  "errors": []
+}
+```
+
+- `fetched` — matches pulled from PandaScore API.
+- `synced` — matches upserted into the DB.
+- `synced_incomplete` — matches missing exactly 2 opponents (not stakeable yet, shown for schedule context only).
+- `resolved` — finished matches auto-settled on-chain during this sync run.
+
+### Admin: probe without writing (test connectivity)
+
+```http
+POST /api/tournaments/source/pandascore/probe
+X-Admin-Token: <AUTH_ADMIN_TOKEN>
+Content-Type: application/json
+
+{ "statuses": ["upcoming"], "videogame_slugs": ["cs-go"], "per_page": 5 }
+```
+
+Returns a raw body preview and item counts — useful to verify the API key is working before running a full sync.
+
+### Admin: check PandaScore config
+
+```http
+GET /api/tournaments/source/pandascore
+```
+
+```json
+{
+  "provider": "pandascore",
+  "enabled": true,
+  "configured": true,
+  "base_url": "https://api.pandascore.co",
+  "default_statuses": ["upcoming", "running"],
+  "default_videogame_slugs": ["cs-go", "valorant", "dota-2"],
+  "default_per_page": 50,
+  "default_max_pages": 5
+}
+```
+
+### Match data enrichments from PandaScore
+
+Compared to GRID, PandaScore rows include richer data that the FE can surface:
+
+| Field | Description |
+|-------|-------------|
+| `league_image_url` | League logo URL — show next to league name |
+| `opponents[].image_url` | Team logo from PandaScore CDN |
+| `opponents[].acronym` | Short team name (e.g. "PHA", "NAVI") |
+| `opponents[].location` | Country code (e.g. "PL", "UA") |
+| `streams_list` | Live stream URLs (Twitch, Kick, YouTube) |
+| `series_full_name` | e.g. "Episode 3: Closed Qualifier 2026" |
+| `number_of_games` | Best-of format (e.g. 3, 5) |
+
+### Recommended sync strategy for hackathon demo
+
+1. **Initial data load**: hit `/api/tournaments/source/pandascore/sync` once with `statuses: ["upcoming","running"]` and all desired game slugs to populate the DB.
+2. **Lobby display**: call `GET /api/tournaments?status=upcoming&limit=20` — matches show immediately.
+3. **Refresh cadence**: re-run the sync every 30 minutes via admin dashboard or scheduled job to pick up new fixtures and updated match statuses.
+4. **Live matches**: running matches auto-update status on next sync. No separate polling endpoint needed.
+5. **Settlement**: when a sync picks up a `finished` match, it auto-resolves on-chain. The FE stake cards will reflect `won`/`lost` after the next `/api/tournaments/:id` refresh.
+
+### GRID is still active for CS2/Dota2/CS:GO
+
+GRID Open Access continues to run in parallel. It provides real-time series state data for CS2/Dota2/CS:GO. The admin sync endpoints are independent — run both if you want maximum coverage for those titles.
+
+```http
+POST /api/tournaments/source/grid/sync
+X-Admin-Token: <AUTH_ADMIN_TOKEN>
+
+{ "videogame_slugs": ["csgo", "dota", "cs2"], "per_page": 100 }
+```
+
+### Security reminder
+
+- `PANDASCORE_API_KEY` lives **only on the server**. Never expose it in FE env vars or network requests.
+- The admin sync endpoints require `X-Admin-Token` — never call these from the consumer app.

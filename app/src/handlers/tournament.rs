@@ -185,6 +185,102 @@ pub async fn sync_grid_tournaments(
     })))
 }
 
+// ─── PandaScore source handlers ───────────────────────────────────────────────
+
+pub async fn get_tournament_source_pandascore(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<PandascoreSourceResponse> {
+    let config = state.pandascore.config();
+    Ok(Json(ApiResponse::ok(PandascoreSourceResponse {
+        provider: "pandascore".to_string(),
+        enabled: config.enabled,
+        configured: config.configured(),
+        base_url: config.base_url.clone(),
+        default_statuses: config.default_statuses.clone(),
+        default_videogame_slugs: config.default_videogame_slugs.clone(),
+        default_per_page: config.default_per_page,
+        default_max_pages: config.default_max_pages,
+    })))
+}
+
+pub async fn probe_pandascore_tournaments(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<PandascoreSyncRequest>,
+) -> AppResult<PandascoreProbeResponse> {
+    verify_admin(&headers)?;
+    let probe = state
+        .pandascore
+        .probe_matches(&req)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+    Ok(Json(ApiResponse::ok(probe)))
+}
+
+pub async fn sync_pandascore_tournaments(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<PandascoreSyncRequest>,
+) -> AppResult<PandascoreSyncResponse> {
+    verify_admin(&headers)?;
+
+    let fetched = state
+        .pandascore
+        .fetch_matches(&req)
+        .await
+        .map_err(|e| bad_request(e.to_string()))?;
+
+    let mut synced = 0usize;
+    let mut synced_incomplete = 0usize;
+    let skipped = 0usize;
+    let mut resolved = 0usize;
+    let mut errors = Vec::new();
+
+    for match_req in fetched.iter() {
+        let match_record = match state.db.upsert_match(match_req).await {
+            Ok(record) => record,
+            Err(e) => {
+                errors.push(format!(
+                    "failed to sync PandaScore match {}: {}",
+                    match_req.pandascore_id, e
+                ));
+                continue;
+            }
+        };
+        synced += 1;
+        if match_req.opponents.len() != 2 {
+            synced_incomplete += 1;
+        }
+
+        if match_req.pandascore_status.as_deref() == Some("finished") {
+            match resolve_finished_provider_match(
+                &state,
+                &match_record.id.to_string(),
+                match_req,
+            )
+            .await
+            {
+                Ok(true) => resolved += 1,
+                Ok(false) => {}
+                Err(e) => errors.push(format!(
+                    "failed to resolve PandaScore match {}: {}",
+                    match_req.pandascore_id, e
+                )),
+            }
+        }
+    }
+
+    Ok(Json(ApiResponse::ok(PandascoreSyncResponse {
+        provider: "pandascore".to_string(),
+        fetched: fetched.len(),
+        synced,
+        synced_incomplete,
+        skipped,
+        resolved,
+        errors,
+    })))
+}
+
 // ─── POST /api/tournaments ────────────────────────────────────────────────────
 /// Create or sync a tournament from provider-shaped data.
 /// Server-side GRID sync should be preferred; this route remains useful for

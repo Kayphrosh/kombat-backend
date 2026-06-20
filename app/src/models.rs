@@ -1045,6 +1045,52 @@ pub struct GridProbeResponse {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PandascoreSyncRequest {
+    pub statuses: Option<Vec<String>>,
+    pub videogame_slugs: Option<Vec<String>>,
+    pub tournament_id: Option<String>,
+    pub league_id: Option<String>,
+    pub serie_id: Option<String>,
+    pub sort: Option<String>,
+    pub per_page: Option<u32>,
+    pub max_pages: Option<u32>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PandascoreSyncResponse {
+    pub provider: String,
+    pub fetched: usize,
+    pub synced: usize,
+    pub synced_incomplete: usize,
+    pub skipped: usize,
+    pub resolved: usize,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PandascoreSourceResponse {
+    pub provider: String,
+    pub enabled: bool,
+    pub configured: bool,
+    pub base_url: String,
+    pub default_statuses: Vec<String>,
+    pub default_videogame_slugs: Vec<String>,
+    pub default_per_page: u32,
+    pub default_max_pages: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PandascoreProbeResponse {
+    pub provider: String,
+    pub url: String,
+    pub http_status: u16,
+    pub success: bool,
+    pub item_count: usize,
+    pub parsed_count: usize,
+    pub body_preview: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct StakeListQuery {
     pub status: Option<String>, // active, won, lost, refunded
     pub match_id: Option<String>,
