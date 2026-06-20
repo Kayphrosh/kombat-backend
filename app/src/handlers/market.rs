@@ -120,6 +120,33 @@ pub async fn create_receipt_listing(
         .await
         .map_err(|e| internal_error(e.to_string()))?;
 
+    // Snapshot the market state at listing time so resale buyers have a
+    // verifiable record of the odds/pool they bought into. Best-effort.
+    let listing_id = listing.id;
+    let snapshot = json!({
+        "record_type": "receipt_listing_snapshot",
+        "listing_id": listing_id.to_string(),
+        "receipt_id": receipt_id,
+        "match_id": match_uuid.to_string(),
+        "opponent_id": opponent_uuid.to_string(),
+        "seller_wallet": seller_wallet,
+        "ask_amount_usdc": req.ask_amount_usdc,
+        "network": network,
+        "listed_at": Utc::now().to_rfc3339(),
+        "expires_at": expires_at.to_rfc3339(),
+        "market_state": serde_json::to_value(&match_with_odds).unwrap_or(json!(null)),
+    });
+    crate::services::agent_pipeline::archive_to_walrus(
+        &state,
+        "receipt_listing_snapshot",
+        Some(match_uuid.to_string()),
+        Some(seller_wallet.clone()),
+        snapshot,
+        None,
+        state.walrus.config().epochs,
+    )
+    .await;
+
     let response = build_listing_response_data(listing, &match_with_odds)?;
     notify_receipt_listing_draft(&state, &response).await;
 

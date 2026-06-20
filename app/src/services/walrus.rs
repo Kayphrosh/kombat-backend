@@ -87,6 +87,19 @@ impl WalrusService {
         manifest: &JsonValue,
         epochs: u32,
     ) -> Result<WalrusStoredBlob> {
+        let body = serde_json::to_vec(manifest)?;
+        self.store_bytes(body, "application/json", epochs).await
+    }
+
+    /// Store arbitrary bytes (images, brackets, documents) on Walrus pinned for
+    /// the given number of epochs. Underlies both JSON archival and durable
+    /// media uploads.
+    pub async fn store_bytes(
+        &self,
+        body: Vec<u8>,
+        content_type: &str,
+        epochs: u32,
+    ) -> Result<WalrusStoredBlob> {
         if !self.config.enabled {
             return Err(anyhow!("Walrus storage is disabled"));
         }
@@ -95,7 +108,6 @@ impl WalrusService {
         };
 
         let epochs = epochs.max(1);
-        let body = serde_json::to_vec(manifest)?;
         if body.len() > self.config.max_upload_bytes {
             return Err(anyhow!(
                 "Walrus artifact exceeds max size of {} bytes",
@@ -108,11 +120,12 @@ impl WalrusService {
             publisher_url.trim_end_matches('/'),
             epochs
         );
+        let size_bytes = body.len();
         let response = self
             .client
             .put(url)
-            .header(reqwest::header::CONTENT_TYPE, "application/json")
-            .body(body.clone())
+            .header(reqwest::header::CONTENT_TYPE, content_type)
+            .body(body)
             .send()
             .await?;
 
@@ -144,7 +157,7 @@ impl WalrusService {
             aggregator_url: self.blob_url(&blob_id),
             blob_id,
             object_id,
-            size_bytes: body.len(),
+            size_bytes,
         })
     }
 }

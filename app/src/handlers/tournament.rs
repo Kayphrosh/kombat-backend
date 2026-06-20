@@ -394,7 +394,53 @@ async fn resolve_finished_provider_match(
         .map_err(|e| e.to_string())?;
     notify_tournament_resolution(state, match_id, &result).await;
 
-    Ok(!matches!(result, ResolveResult::Empty))
+    let resolved = !matches!(result, ResolveResult::Empty);
+
+    // Proof-of-settlement: archive an immutable, third-party-verifiable record of
+    // exactly what provider data we settled on. Best-effort — never blocks the
+    // resolution itself.
+    if resolved {
+        let manifest = serde_json::json!({
+            "record_type": "settlement_proof",
+            "match_id": match_id,
+            "match_name": match_data.match_info.name,
+            "source": req.source.clone().unwrap_or_else(|| "provider".to_string()),
+            "provider_match_id": req.pandascore_id,
+            "winner_opponent_id": winner.opponent.id.to_string(),
+            "winner_name": winner.opponent.name,
+            "winner_provider_id": winner_id,
+            "forfeit": forfeit,
+            "results": raw_data.get("results").cloned(),
+            "scheduled_at": match_data.match_info.scheduled_at,
+            "resolved_at": chrono::Utc::now().to_rfc3339(),
+            "sui_pool_object_id": match_data.match_info.sui_pool_object_id,
+            "total_pool_usdc": match_data.total_pool_usdc,
+            "provider_payload": raw_data,
+        });
+        let epochs = crate::services::agent_pipeline::epochs_for_pool(
+            match_data.total_pool_usdc,
+            state.walrus.config().epochs,
+        );
+        if let Some(stored) = crate::services::agent_pipeline::archive_to_walrus(
+            state,
+            "settlement_proof",
+            Some(match_id.to_string()),
+            None,
+            manifest,
+            Some(serde_json::json!({ "source": req.source, "winner": winner.opponent.name })),
+            epochs,
+        )
+        .await
+        {
+            tracing::info!(
+                "Settlement proof archived for match {}: blob {}",
+                match_id,
+                stored.blob_id
+            );
+        }
+    }
+
+    Ok(resolved)
 }
 
 // ─── GET /api/tournaments/:id ─────────────────────────────────────────────────
@@ -534,6 +580,16 @@ pub async fn run_pool_backfill(
             continue;
         }
 
+        // Capture provider provenance before `match_record` fields are moved
+        // into the result entry below.
+        let prov_match_id = match_record.id;
+        let prov_name = match_record.name.clone();
+        let prov_source = match_record.source.clone();
+        let prov_raw = match_record.raw_data.clone();
+        let prov_scheduled = match_record.scheduled_at;
+        let prov_team_a = opponents[0].name.clone();
+        let prov_team_b = opponents[1].name.clone();
+
         let stake_deadline_ms = pool_stake_deadline_ms(&match_record, default_stake_window_hours);
 
         match state
@@ -556,6 +612,32 @@ pub async fn run_pool_backfill(
                 {
                     Ok(_) => {
                         created += 1;
+
+                        // Provenance: archive the source data the market opened on,
+                        // so the pool's basis is verifiable and provider-immutable.
+                        let manifest = serde_json::json!({
+                            "record_type": "market_open_snapshot",
+                            "match_id": prov_match_id.to_string(),
+                            "match_name": prov_name,
+                            "source": prov_source,
+                            "teams": [prov_team_a, prov_team_b],
+                            "scheduled_at": prov_scheduled,
+                            "sui_pool_object_id": pool_object_id.clone(),
+                            "sui_network": network.clone(),
+                            "pool_created_at": chrono::Utc::now().to_rfc3339(),
+                            "provider_payload": prov_raw,
+                        });
+                        crate::services::agent_pipeline::archive_to_walrus(
+                            state,
+                            "market_open_snapshot",
+                            Some(prov_match_id.to_string()),
+                            None,
+                            manifest,
+                            None,
+                            state.walrus.config().epochs,
+                        )
+                        .await;
+
                         entries.push(MatchPoolBackfillEntry {
                             match_id: match_record.id,
                             match_name: match_record.name,

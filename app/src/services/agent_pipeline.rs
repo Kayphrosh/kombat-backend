@@ -6,7 +6,54 @@
 
 use serde_json::Value;
 
+use crate::models::CreateWalrusArtifactRequest;
+use crate::services::walrus::WalrusStoredBlob;
 use crate::state::AppState;
+
+/// Best-effort: store a JSON manifest on Walrus and persist an artifact row.
+///
+/// This is the single entry point every feature uses to push durable,
+/// verifiable records to Walrus (settlement proofs, provider snapshots, agent
+/// audit logs, marketplace snapshots, organizer media manifests). It never
+/// fails the caller's primary operation — if Walrus is disabled or the upload
+/// errors, it logs and returns `None`.
+pub async fn archive_to_walrus(
+    state: &AppState,
+    artifact_type: &str,
+    match_id: Option<String>,
+    owner_wallet: Option<String>,
+    manifest: Value,
+    metadata: Option<Value>,
+    epochs: u32,
+) -> Option<WalrusStoredBlob> {
+    if !state.walrus.config().configured() {
+        return None;
+    }
+
+    let stored = match state.walrus.store_json_with_epochs(&manifest, epochs).await {
+        Ok(stored) => stored,
+        Err(e) => {
+            tracing::warn!("Walrus archive failed ({}): {}", artifact_type, e);
+            return None;
+        }
+    };
+
+    let artifact_req = CreateWalrusArtifactRequest {
+        artifact_type: artifact_type.to_string(),
+        owner_wallet,
+        match_id,
+        outcome_proposal_id: None,
+        content_type: Some("application/json".to_string()),
+        manifest,
+        metadata,
+    };
+    if let Err(e) = state.db.create_walrus_artifact(&artifact_req, &stored).await {
+        // The blob is already durably stored; only the index row failed.
+        tracing::warn!("Walrus artifact row failed ({}): {}", artifact_type, e);
+    }
+
+    Some(stored)
+}
 
 /// Default minimum confidence for a proposal to be auto-accepted without review.
 pub const DEFAULT_MIN_AUTO_ACCEPT_CONFIDENCE: f64 = 0.80;
