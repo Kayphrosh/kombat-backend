@@ -273,6 +273,12 @@ fn status_to_path(status: &str) -> String {
     }
 }
 
+/// Parse a single PandaScore match JSON object into our internal request shape.
+/// Exposed for the realtime webhook path, which receives one match per delivery.
+pub fn parse_match_value(raw: Value) -> Option<CreateMatchRequest> {
+    pandascore_match_from_value(raw)
+}
+
 fn pandascore_match_from_value(raw: Value) -> Option<CreateMatchRequest> {
     let id = raw.get("id")?.as_i64()?;
     let name = raw

@@ -69,7 +69,7 @@ use handlers::wager::{
 use handlers::walrus::{
     create_walrus_artifact, get_walrus_artifact, get_walrus_blob_url, get_walrus_config,
 };
-use handlers::webhook::handle_match_result_webhook;
+use handlers::webhook::{handle_match_result_webhook, handle_pandascore_webhook};
 use prometheus::{Encoder, IntCounter, TextEncoder};
 use services::{
     DbService, GridConfig, GridService, PandascoreConfig, PandascoreService, RampConfig,
@@ -212,6 +212,11 @@ async fn main() -> anyhow::Result<()> {
         upload_service,
     });
 
+    // ── Background PandaScore sync scheduler ──────────────────────────────────
+    spawn_pandascore_scheduler(state.clone());
+    // Fast loop for near-real-time live/just-finished match updates.
+    spawn_pandascore_live_poller(state.clone());
+
     // ── CORS ──────────────────────────────────────────────────────────────────
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -352,6 +357,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/webhooks/match-result",
             post(handle_match_result_webhook),
         )
+        .route(
+            "/api/webhooks/pandascore",
+            post(handle_pandascore_webhook),
+        )
         // ── P2P wagers (1-v-1) ───────────────────────────────────────────────
         .route("/api/wagers", get(list_wagers).post(create_wager))
         .route("/api/wagers/mine", get(list_my_wagers))
@@ -486,6 +495,174 @@ async fn get_metrics() -> impl axum::response::IntoResponse {
         [("Content-Type", "text/plain; version=0.0.4")],
         String::from_utf8(buffer).unwrap_or_default(),
     )
+}
+
+/// Spawns a background task that periodically syncs PandaScore matches so the
+/// lobby stays fresh and stale `upcoming` statuses get advanced to
+/// running/finished without any manual admin trigger.
+///
+/// Controlled by env:
+/// - `PANDASCORE_AUTO_SYNC` (default: enabled when PandaScore is configured)
+/// - `PANDASCORE_SYNC_INTERVAL_MINUTES` (default: 30)
+fn spawn_pandascore_scheduler(state: Arc<AppState>) {
+    if !state.pandascore.config().configured() {
+        tracing::info!("PandaScore auto-sync disabled: provider not configured");
+        return;
+    }
+
+    let enabled = std::env::var("PANDASCORE_AUTO_SYNC")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(true);
+    if !enabled {
+        tracing::info!("PandaScore auto-sync disabled via PANDASCORE_AUTO_SYNC");
+        return;
+    }
+
+    let interval_minutes = std::env::var("PANDASCORE_SYNC_INTERVAL_MINUTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(10);
+
+    // When enabled, the scheduler also creates on-chain pools for newly-complete
+    // matches after each sync, so the import->stakeable pipeline is hands-off.
+    let auto_backfill = std::env::var("POOL_AUTO_BACKFILL")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    // Cap pools created per cycle so a cold start doesn't fire hundreds of
+    // on-chain transactions at once.
+    let backfill_limit = std::env::var("POOL_AUTO_BACKFILL_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(25);
+
+    tracing::info!(
+        "PandaScore auto-sync enabled: every {} minute(s) (auto_backfill={})",
+        interval_minutes,
+        auto_backfill
+    );
+
+    tokio::spawn(async move {
+        // Give the server a moment to finish binding before the first sync.
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(interval_minutes * 60));
+
+        loop {
+            ticker.tick().await;
+            // Default request uses configured statuses (upcoming, running, past)
+            // and game slugs — pulling `past` is what advances stale rows.
+            let req = models::PandascoreSyncRequest {
+                statuses: None,
+                videogame_slugs: None,
+                tournament_id: None,
+                league_id: None,
+                serie_id: None,
+                sort: None,
+                per_page: None,
+                max_pages: None,
+            };
+            match handlers::tournament::run_pandascore_sync(&state, &req).await {
+                Ok(resp) => tracing::info!(
+                    "PandaScore auto-sync: fetched={} synced={} resolved={} errors={}",
+                    resp.fetched,
+                    resp.synced,
+                    resp.resolved,
+                    resp.errors.len()
+                ),
+                Err(e) => tracing::warn!("PandaScore auto-sync failed: {}", e),
+            }
+
+            if auto_backfill {
+                match handlers::tournament::run_pool_backfill(
+                    &state,
+                    None,
+                    None,
+                    Some(backfill_limit),
+                    None,
+                )
+                .await
+                {
+                    Ok(resp) => tracing::info!(
+                        "Pool auto-backfill: attempted={} created={} skipped={} failed={}",
+                        resp.attempted,
+                        resp.created,
+                        resp.skipped,
+                        resp.failed
+                    ),
+                    Err(e) => tracing::warn!("Pool auto-backfill failed: {}", e),
+                }
+            }
+        }
+    });
+}
+
+/// Fast near-real-time poller for live and just-finished matches. PandaScore
+/// webhooks are plan-gated, so this is the no-webhook path to keep live status,
+/// scores, and finish->resolution fresh. It only pulls `running` + recently
+/// modified `past` matches across all games (≈2 API calls per cycle), so it is
+/// cheap enough to run on a tight interval.
+///
+/// Controlled by env:
+/// - `PANDASCORE_LIVE_POLL_SECONDS` (default: 60, set 0 to disable)
+fn spawn_pandascore_live_poller(state: Arc<AppState>) {
+    if !state.pandascore.config().configured() {
+        return;
+    }
+    let enabled = std::env::var("PANDASCORE_AUTO_SYNC")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(true);
+    if !enabled {
+        return;
+    }
+
+    let poll_seconds = std::env::var("PANDASCORE_LIVE_POLL_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(60);
+    if poll_seconds == 0 {
+        tracing::info!("PandaScore live poller disabled (PANDASCORE_LIVE_POLL_SECONDS=0)");
+        return;
+    }
+
+    tracing::info!(
+        "PandaScore live poller enabled: every {} second(s)",
+        poll_seconds
+    );
+
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(poll_seconds));
+        loop {
+            ticker.tick().await;
+            // running + freshest past, all games (empty slugs => one call per
+            // status), newest-changed first so a just-finished match resolves
+            // within one cycle.
+            let req = models::PandascoreSyncRequest {
+                statuses: Some(vec!["running".to_string(), "past".to_string()]),
+                videogame_slugs: Some(vec![]),
+                tournament_id: None,
+                league_id: None,
+                serie_id: None,
+                sort: Some("-modified_at".to_string()),
+                per_page: Some(50),
+                max_pages: Some(1),
+            };
+            match handlers::tournament::run_pandascore_sync(&state, &req).await {
+                Ok(resp) if resp.resolved > 0 || resp.synced > 0 => tracing::debug!(
+                    "PandaScore live poll: synced={} resolved={}",
+                    resp.synced,
+                    resp.resolved
+                ),
+                Ok(_) => {}
+                Err(e) => tracing::warn!("PandaScore live poll failed: {}", e),
+            }
+        }
+    });
 }
 
 async fn health_handler(

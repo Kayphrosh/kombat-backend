@@ -2076,8 +2076,27 @@ impl DbService {
                 other => Some(vec![other.to_string()]),
             },
         };
+        let apply_stale_guard = statuses.is_some();
         if let Some(statuses) = statuses {
             qb.push(" AND status = ANY(").push_bind(statuses).push(")");
+        }
+
+        // Hide stale "upcoming" matches: rows whose provider status was never
+        // advanced past `upcoming` but whose scheduled start is well in the past
+        // (the provider/sync simply never updated them). Skipped for `status=all`
+        // so admin/debug views can still see everything.
+        if apply_stale_guard {
+            let stale_hours: i64 = std::env::var("MATCH_STALE_UPCOMING_HOURS")
+                .ok()
+                .and_then(|v| v.parse::<i64>().ok())
+                .filter(|v| *v > 0)
+                .unwrap_or(4);
+            let stale_cutoff = chrono::Utc::now() - chrono::Duration::hours(stale_hours);
+            qb.push(
+                " AND NOT (status = 'upcoming' AND scheduled_at IS NOT NULL AND scheduled_at < ",
+            )
+            .push_bind(stale_cutoff)
+            .push(")");
         }
 
         match query.source.as_deref().map(str::trim) {

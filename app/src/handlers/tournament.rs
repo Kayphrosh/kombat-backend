@@ -224,11 +224,24 @@ pub async fn sync_pandascore_tournaments(
 ) -> AppResult<PandascoreSyncResponse> {
     verify_admin(&headers)?;
 
+    let response = run_pandascore_sync(&state, &req)
+        .await
+        .map_err(|e| bad_request(e))?;
+
+    Ok(Json(ApiResponse::ok(response)))
+}
+
+/// Core PandaScore sync cycle: fetch matches, upsert them, and auto-resolve any
+/// finished ones. Shared by the admin HTTP handler and the background scheduler.
+pub async fn run_pandascore_sync(
+    state: &Arc<AppState>,
+    req: &PandascoreSyncRequest,
+) -> Result<PandascoreSyncResponse, String> {
     let fetched = state
         .pandascore
-        .fetch_matches(&req)
+        .fetch_matches(req)
         .await
-        .map_err(|e| bad_request(e.to_string()))?;
+        .map_err(|e| e.to_string())?;
 
     let mut synced = 0usize;
     let mut synced_incomplete = 0usize;
@@ -253,12 +266,8 @@ pub async fn sync_pandascore_tournaments(
         }
 
         if match_req.pandascore_status.as_deref() == Some("finished") {
-            match resolve_finished_provider_match(
-                &state,
-                &match_record.id.to_string(),
-                match_req,
-            )
-            .await
+            match resolve_finished_provider_match(state, &match_record.id.to_string(), match_req)
+                .await
             {
                 Ok(true) => resolved += 1,
                 Ok(false) => {}
@@ -270,7 +279,7 @@ pub async fn sync_pandascore_tournaments(
         }
     }
 
-    Ok(Json(ApiResponse::ok(PandascoreSyncResponse {
+    Ok(PandascoreSyncResponse {
         provider: "pandascore".to_string(),
         fetched: fetched.len(),
         synced,
@@ -278,7 +287,7 @@ pub async fn sync_pandascore_tournaments(
         skipped,
         resolved,
         errors,
-    })))
+    })
 }
 
 // ─── POST /api/tournaments ────────────────────────────────────────────────────
@@ -449,23 +458,44 @@ pub async fn backfill_tournament_pools(
 ) -> AppResult<MatchPoolBackfillResponse> {
     verify_admin(&headers)?;
 
-    let network = req
-        .sui_network
-        .unwrap_or_else(|| state.sui.config().active_network.clone());
+    let response = run_pool_backfill(
+        &state,
+        req.sui_network,
+        req.match_ids,
+        req.limit,
+        req.default_stake_window_hours,
+    )
+    .await
+    .map_err(|e| bad_request(e))?;
+
+    Ok(Json(ApiResponse::ok(response)))
+}
+
+/// Core pool-backfill cycle: finds matches with two known opponents but no
+/// on-chain pool, creates a `tournament_staking` pool for each, and records the
+/// pool object id. Shared by the admin HTTP handler and the background scheduler.
+pub async fn run_pool_backfill(
+    state: &Arc<AppState>,
+    sui_network: Option<String>,
+    match_ids: Option<Vec<uuid::Uuid>>,
+    limit: Option<i64>,
+    default_stake_window_hours: Option<i64>,
+) -> Result<MatchPoolBackfillResponse, String> {
+    let network = sui_network.unwrap_or_else(|| state.sui.config().active_network.clone());
     let network_config = state
         .sui
         .config()
         .network(&network)
-        .ok_or_else(|| bad_request("Unsupported Sui network"))?;
+        .ok_or_else(|| "Unsupported Sui network".to_string())?;
     let network = network_config.network.clone();
-    let limit = req.limit.unwrap_or(25);
-    let default_stake_window_hours = req.default_stake_window_hours.unwrap_or(72).clamp(1, 720);
+    let limit = limit.unwrap_or(25);
+    let default_stake_window_hours = default_stake_window_hours.unwrap_or(72).clamp(1, 720);
 
     let matches = state
         .db
-        .list_matches_missing_pool(req.match_ids.as_deref(), limit)
+        .list_matches_missing_pool(match_ids.as_deref(), limit)
         .await
-        .map_err(|e| internal_error(e.to_string()))?;
+        .map_err(|e| e.to_string())?;
 
     let mut entries = Vec::with_capacity(matches.len());
     let mut created = 0usize;
@@ -565,14 +595,59 @@ pub async fn backfill_tournament_pools(
         }
     }
 
-    Ok(Json(ApiResponse::ok(MatchPoolBackfillResponse {
+    Ok(MatchPoolBackfillResponse {
         network,
         attempted: entries.len(),
         created,
         skipped,
         failed,
         entries,
-    })))
+    })
+}
+
+/// Ingest a single PandaScore match delivered by the realtime webhook: upsert
+/// it (advancing status/score/schedule instantly), resolve it if finished, and
+/// create an on-chain pool if it just became complete and auto-backfill is on.
+pub async fn ingest_pandascore_match(
+    state: &Arc<AppState>,
+    match_req: &CreateMatchRequest,
+) -> Result<serde_json::Value, String> {
+    let record = state
+        .db
+        .upsert_match(match_req)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let is_finished = match_req.pandascore_status.as_deref() == Some("finished");
+    let mut resolved = false;
+    if is_finished {
+        resolved = resolve_finished_provider_match(state, &record.id.to_string(), match_req)
+            .await
+            .unwrap_or(false);
+    }
+
+    let auto_backfill = std::env::var("POOL_AUTO_BACKFILL")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    let mut pool_created = false;
+    if auto_backfill
+        && !is_finished
+        && match_req.opponents.len() == 2
+        && record.sui_pool_object_id.is_none()
+    {
+        match run_pool_backfill(state, None, Some(vec![record.id]), Some(1), None).await {
+            Ok(resp) => pool_created = resp.created > 0,
+            Err(e) => tracing::warn!("webhook pool backfill failed for {}: {}", record.id, e),
+        }
+    }
+
+    Ok(serde_json::json!({
+        "match_id": record.id,
+        "status": record.status,
+        "resolved": resolved,
+        "pool_created": pool_created,
+    }))
 }
 
 pub async fn sync_tournament_stakes(

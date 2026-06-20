@@ -1,18 +1,20 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{
+    handlers::tournament::ingest_pandascore_match,
     models::{
         AgentOutcomeProposalRequest, ApiResponse, CreateOutcomeProposalRequest,
         CreateWalrusArtifactRequest,
     },
-    services::agent_pipeline,
+    services::{agent_pipeline, pandascore},
     state::AppState,
 };
 
@@ -84,6 +86,94 @@ pub async fn handle_match_result_webhook(
         "organizer_webhook",
     )
     .await
+}
+
+// ─── PandaScore realtime webhook ──────────────────────────────────────────────
+
+/// Realtime PandaScore webhook. PandaScore delivers the full updated match
+/// object whenever a match changes state (scheduled → running → finished, score
+/// updates, reschedules). We upsert it immediately so the DB mirrors live data
+/// without waiting for the next poll, and resolve/create pools as needed.
+///
+/// Auth: PandaScore lets you append a secret to the callback URL. We accept the
+/// token via the `?token=` query param OR an `X-PandaScore-Token` header, and
+/// compare it in constant time against `PANDASCORE_WEBHOOK_TOKEN`.
+pub async fn handle_pandascore_webhook(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+    body: axum::body::Bytes,
+) -> AppResult<serde_json::Value> {
+    verify_pandascore_token(&headers, &params)?;
+
+    let raw: serde_json::Value =
+        serde_json::from_slice(&body).map_err(|e| bad_request(format!("Invalid JSON: {}", e)))?;
+
+    // PandaScore may send the match object directly, or wrap it under a key.
+    // Probe the common shapes so we are resilient to payload framing.
+    let match_value = extract_match_object(&raw)
+        .ok_or_else(|| bad_request("webhook payload did not contain a match object"))?;
+
+    let match_req = pandascore::parse_match_value(match_value)
+        .ok_or_else(|| bad_request("could not parse match from webhook payload"))?;
+
+    let result = ingest_pandascore_match(&state, &match_req)
+        .await
+        .map_err(internal_error)?;
+
+    Ok(Json(ApiResponse::ok(result)))
+}
+
+/// Locate the match object inside a PandaScore webhook body. Handles the object
+/// being at the top level, or nested under `match`/`data`/`payload`.
+fn extract_match_object(raw: &serde_json::Value) -> Option<serde_json::Value> {
+    let looks_like_match =
+        |v: &serde_json::Value| v.get("id").is_some() && v.get("opponents").is_some();
+
+    if looks_like_match(raw) {
+        return Some(raw.clone());
+    }
+    for key in ["match", "data", "payload", "object"] {
+        if let Some(inner) = raw.get(key) {
+            if looks_like_match(inner) {
+                return Some(inner.clone());
+            }
+        }
+    }
+    // Some deliveries wrap as { "type": "match", "match": {...} } already covered;
+    // fall back to the top-level object if it at least carries an id.
+    if raw.get("id").is_some() {
+        return Some(raw.clone());
+    }
+    None
+}
+
+/// Constant-time check of the PandaScore webhook token from query or header.
+fn verify_pandascore_token(
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> Result<(), (StatusCode, Json<ApiResponse<()>>)> {
+    let secret = std::env::var("PANDASCORE_WEBHOOK_TOKEN")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| {
+            service_unavailable("PandaScore webhook not configured (PANDASCORE_WEBHOOK_TOKEN unset)")
+        })?;
+
+    let provided = params
+        .get("token")
+        .map(String::as_str)
+        .or_else(|| {
+            headers
+                .get("x-pandascore-token")
+                .and_then(|v| v.to_str().ok())
+        })
+        .ok_or_else(|| unauthorized("missing PandaScore webhook token"))?;
+
+    if !constant_time_eq(provided.as_bytes(), secret.as_bytes()) {
+        return Err(unauthorized("invalid PandaScore webhook token"));
+    }
+    Ok(())
 }
 
 // ─── Shared processing ─────────────────────────────────────────────────────────
@@ -290,4 +380,46 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         .zip(b.iter())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_top_level_match() {
+        let raw = serde_json::json!({
+            "id": 123,
+            "opponents": [{ "opponent": { "id": 1, "name": "A" } }]
+        });
+        let found = extract_match_object(&raw).expect("should find match");
+        assert_eq!(found.get("id").and_then(|v| v.as_i64()), Some(123));
+    }
+
+    #[test]
+    fn extracts_nested_match() {
+        let raw = serde_json::json!({
+            "type": "match",
+            "match": {
+                "id": 456,
+                "opponents": [{ "opponent": { "id": 2, "name": "B" } }]
+            }
+        });
+        let found = extract_match_object(&raw).expect("should find nested match");
+        assert_eq!(found.get("id").and_then(|v| v.as_i64()), Some(456));
+    }
+
+    #[test]
+    fn falls_back_to_object_with_id() {
+        // No opponents yet (TBD bracket slot) but still a match payload.
+        let raw = serde_json::json!({ "id": 789, "status": "not_started" });
+        let found = extract_match_object(&raw).expect("should fall back to id");
+        assert_eq!(found.get("id").and_then(|v| v.as_i64()), Some(789));
+    }
+
+    #[test]
+    fn rejects_non_match_payload() {
+        let raw = serde_json::json!({ "ping": "pong" });
+        assert!(extract_match_object(&raw).is_none());
+    }
 }
