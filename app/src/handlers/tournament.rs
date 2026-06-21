@@ -739,34 +739,49 @@ pub async fn sync_tournament_stakes(
     Json(req): Json<SyncMatchStakesRequest>,
 ) -> AppResult<SyncMatchStakesResponse> {
     verify_admin(&headers)?;
+    let response = run_stake_sync(&state, &id, req.sui_network, req.limit)
+        .await
+        .map_err(|e| bad_request(e))?;
+    Ok(Json(ApiResponse::ok(response)))
+}
 
+/// Index on-chain stake events for a single match into `pool_stakes`, so DB
+/// aggregates (total_stakers, per-side pools) reflect on-chain reality. The PTB
+/// staking flow settles on-chain without hitting the DB, so this reconciliation
+/// is what keeps the counts correct. Shared by the admin endpoint and the
+/// background reconciler. Idempotent — already-indexed stakes are skipped.
+pub async fn run_stake_sync(
+    state: &Arc<AppState>,
+    id: &str,
+    sui_network: Option<String>,
+    limit: Option<usize>,
+) -> Result<SyncMatchStakesResponse, String> {
     let mut match_with_odds = state
         .db
-        .get_match_with_odds(&id)
+        .get_match_with_odds(id)
         .await
-        .map_err(|e| internal_error(e.to_string()))?
-        .ok_or_else(|| not_found("Tournament not found"))?;
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "Tournament not found".to_string())?;
     let pool_object_id = match_with_odds
         .match_info
         .sui_pool_object_id
         .clone()
-        .ok_or_else(|| bad_request("Tournament pool is not configured"))?;
-    let network = req
-        .sui_network
+        .ok_or_else(|| "Tournament pool is not configured".to_string())?;
+    let network = sui_network
         .or_else(|| match_with_odds.match_info.sui_network.clone())
         .unwrap_or_else(|| state.sui.config().active_network.clone());
     let network_config = state
         .sui
         .config()
         .network(&network)
-        .ok_or_else(|| bad_request("Unsupported Sui network"))?;
+        .ok_or_else(|| "Unsupported Sui network".to_string())?;
     let network = network_config.network.clone();
 
     let events = state
         .sui
-        .stake_events_for_pool(&network, &pool_object_id, req.limit.unwrap_or(50))
+        .stake_events_for_pool(&network, &pool_object_id, limit.unwrap_or(50))
         .await
-        .map_err(|e| bad_request(e.to_string()))?;
+        .map_err(|e| e.to_string())?;
 
     let mut entries = Vec::with_capacity(events.len());
     let mut indexed = 0usize;
@@ -851,9 +866,9 @@ pub async fn sync_tournament_stakes(
         }
     }
 
-    hydrate_match_from_chain(&state, &mut match_with_odds).await;
+    hydrate_match_from_chain(state, &mut match_with_odds).await;
 
-    Ok(Json(ApiResponse::ok(SyncMatchStakesResponse {
+    Ok(SyncMatchStakesResponse {
         match_id: match_with_odds.match_info.id,
         network,
         pool_object_id,
@@ -861,7 +876,7 @@ pub async fn sync_tournament_stakes(
         indexed,
         skipped,
         entries,
-    })))
+    })
 }
 
 fn pool_stake_deadline_ms(match_record: &MatchRecord, default_stake_window_hours: i64) -> u64 {

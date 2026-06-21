@@ -216,6 +216,8 @@ async fn main() -> anyhow::Result<()> {
     spawn_pandascore_scheduler(state.clone());
     // Fast loop for near-real-time live/just-finished match updates.
     spawn_pandascore_live_poller(state.clone());
+    // Index on-chain stakes into the DB so pool/staker aggregates stay correct.
+    spawn_stake_reconciler(state.clone());
 
     // ── CORS ──────────────────────────────────────────────────────────────────
     let cors = CorsLayer::new()
@@ -674,6 +676,69 @@ fn spawn_pandascore_live_poller(state: Arc<AppState>) {
                 ),
                 Ok(_) => {}
                 Err(e) => tracing::warn!("PandaScore live poll failed: {}", e),
+            }
+        }
+    });
+}
+
+/// Background reconciler: indexes on-chain stake events into the `pool_stakes`
+/// table for matches that have an active pool. The PTB staking flow settles
+/// on-chain without writing to the DB, so without this, DB aggregates
+/// (total_stakers, per-side pools) lag behind on-chain reality.
+///
+/// Controlled by env:
+/// - `STAKE_RECONCILE_ENABLED` (default: on when a Sui package is configured)
+/// - `STAKE_RECONCILE_SECONDS` (default: 120)
+/// - `STAKE_RECONCILE_LIMIT` (matches scanned per cycle, default: 40)
+fn spawn_stake_reconciler(state: Arc<AppState>) {
+    let enabled = std::env::var("STAKE_RECONCILE_ENABLED")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(true);
+    if !enabled {
+        tracing::info!("Stake reconciler disabled via STAKE_RECONCILE_ENABLED");
+        return;
+    }
+    let interval_secs = std::env::var("STAKE_RECONCILE_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(120);
+    let scan_limit = std::env::var("STAKE_RECONCILE_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(40);
+
+    tracing::info!(
+        "Stake reconciler enabled: every {}s, up to {} pooled matches/cycle",
+        interval_secs,
+        scan_limit
+    );
+
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        loop {
+            ticker.tick().await;
+            let matches = match state.db.list_matches_with_active_pools(scan_limit).await {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!("stake reconciler: failed to list pooled matches: {}", e);
+                    continue;
+                }
+            };
+            let mut indexed_total = 0usize;
+            for m in matches {
+                match handlers::tournament::run_stake_sync(&state, &m.id.to_string(), None, Some(50usize))
+                    .await
+                {
+                    Ok(resp) => indexed_total += resp.indexed,
+                    Err(e) => tracing::debug!("stake reconcile {}: {}", m.id, e),
+                }
+            }
+            if indexed_total > 0 {
+                tracing::info!("Stake reconciler: indexed {} new stake(s)", indexed_total);
             }
         }
     });

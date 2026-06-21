@@ -1917,6 +1917,26 @@ impl DbService {
         Ok(row)
     }
 
+    /// Active (upcoming/live) matches that already have an on-chain pool — the
+    /// set the stake reconciler scans to index on-chain stakes into the DB.
+    pub async fn list_matches_with_active_pools(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<crate::models::MatchRecord>> {
+        let limit = limit.clamp(1, 100);
+        Ok(sqlx::query_as::<_, crate::models::MatchRecord>(
+            r#"SELECT *
+               FROM matches
+               WHERE sui_pool_object_id IS NOT NULL
+                 AND status IN ('upcoming', 'live')
+               ORDER BY scheduled_at ASC NULLS LAST
+               LIMIT $1"#,
+        )
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     pub async fn list_matches_missing_pool(
         &self,
         match_ids: Option<&[uuid::Uuid]>,
