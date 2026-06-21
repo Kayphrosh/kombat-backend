@@ -539,10 +539,12 @@ fn spawn_pandascore_scheduler(state: Arc<AppState>) {
 
     // When enabled, the scheduler also creates on-chain pools for newly-complete
     // matches after each sync, so the import->stakeable pipeline is hands-off.
+    // Defaults to ON so a missing env var doesn't silently leave upcoming
+    // matches un-stakeable; set POOL_AUTO_BACKFILL=false to disable.
     let auto_backfill = std::env::var("POOL_AUTO_BACKFILL")
         .ok()
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
+        .unwrap_or(true);
     // Cap pools created per cycle so a cold start doesn't fire hundreds of
     // on-chain transactions at once.
     let backfill_limit = std::env::var("POOL_AUTO_BACKFILL_LIMIT")
