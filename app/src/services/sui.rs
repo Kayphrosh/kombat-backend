@@ -309,11 +309,17 @@ impl SuiService {
 
     pub fn normalize_address(address: &str) -> Option<String> {
         let address = address.trim();
-        let hex = address.strip_prefix("0x")?;
-        if hex.len() != 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        let hex = address
+            .strip_prefix("0x")
+            .or_else(|| address.strip_prefix("0X"))?;
+        if hex.is_empty() || hex.len() > 64 || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
-        Some(format!("0x{}", hex.to_ascii_lowercase()))
+        // Sui addresses are 32 bytes. They are frequently transmitted with
+        // leading zeros stripped (e.g. "0xabc"), so canonicalize to lowercase
+        // left-padded to 64 hex chars. Without this, the padded and stripped
+        // forms of the same address compare unequal and break wallet-match auth.
+        Some(format!("0x{:0>64}", hex.to_ascii_lowercase()))
     }
 
     pub async fn chain_identifier(&self) -> Result<String> {
@@ -586,12 +592,31 @@ mod tests {
 
     #[test]
     fn rejects_invalid_sui_address() {
-        assert!(SuiService::normalize_address("0xabc").is_none());
-        assert!(SuiService::normalize_address("abc").is_none());
+        assert!(SuiService::normalize_address("abc").is_none()); // no 0x prefix
+        assert!(SuiService::normalize_address("0x").is_none()); // empty
         assert!(SuiService::normalize_address(
             "0xzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
         )
-        .is_none());
+        .is_none()); // non-hex
+        // longer than 32 bytes
+        assert!(SuiService::normalize_address(&format!("0x{}", "a".repeat(65))).is_none());
+    }
+
+    #[test]
+    fn pads_shortened_sui_address_to_canonical_form() {
+        // Leading-zero addresses are often sent stripped; padded and stripped
+        // forms must canonicalize to the same value so wallet-match auth holds.
+        let padded = "0x00a1b2c3000000000000000000000000000000000000000000000000000000ab";
+        let stripped = "0xa1b2c3000000000000000000000000000000000000000000000000000000ab";
+        assert_eq!(
+            SuiService::normalize_address(padded),
+            SuiService::normalize_address(stripped)
+        );
+        // "0xabc" is a valid shortened address, not invalid.
+        assert_eq!(
+            SuiService::normalize_address("0xabc").as_deref(),
+            Some("0x0000000000000000000000000000000000000000000000000000000000000abc")
+        );
     }
 
     #[test]
