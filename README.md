@@ -10,10 +10,23 @@ service built on [Axum](https://github.com/tokio-rs/axum) that orchestrates matc
 ingestion, on-chain settlement, a receipt marketplace, peer-to-peer wagers, and a verifiable
 outcome pipeline.
 
-- **Production:** `https://kombat-backend-production.up.railway.app`
-- **Local:** `http://localhost:3000`
-- **Frontend integration guide:** [`docs/frontend-integration-guide.md`](docs/frontend-integration-guide.md)
-- **Mobile API reference:** [`docs/MOBILE_API_REFERENCE.md`](docs/MOBILE_API_REFERENCE.md)
+### On-chain deployment (Sui testnet)
+
+| Contract / Object | ID | Verify |
+|-------------------|----|--------|
+| Tournament staking package | `0x3c856930010122497861f23d703a9c5045bdcc75bf70f9931e0653f7637b90bc` | [SuiVision](https://testnet.suivision.xyz/package/0x3c856930010122497861f23d703a9c5045bdcc75bf70f9931e0653f7637b90bc) · [Suiscan](https://suiscan.xyz/testnet/object/0x3c856930010122497861f23d703a9c5045bdcc75bf70f9931e0653f7637b90bc) |
+| P2P wager package | `0xae1b02ef5fdabec4d8d508d08a43c077296ccd6dd273ba09bcad24bec987e2ea` | [SuiVision](https://testnet.suivision.xyz/package/0xae1b02ef5fdabec4d8d508d08a43c077296ccd6dd273ba09bcad24bec987e2ea) · [Suiscan](https://suiscan.xyz/testnet/object/0xae1b02ef5fdabec4d8d508d08a43c077296ccd6dd273ba09bcad24bec987e2ea) |
+| Staking AdminCap | `0x760e7a3ccda2c20b123f5e8fed091cc11e488ebd785f3f179b77bfdf0a5903de` | [SuiVision](https://testnet.suivision.xyz/object/0x760e7a3ccda2c20b123f5e8fed091cc11e488ebd785f3f179b77bfdf0a5903de) |
+| USDC coin type | `0xa1ec7fc00a6f40db9693ad1415d0c193ad3906494428cf252621037bd7117e29::usdc::USDC` | — |
+
+**Walrus** (durable verifiable storage) runs on **testnet**. Any archived blob is publicly
+fetchable and verifiable:
+
+- Aggregator: `https://aggregator.walrus-testnet.walrus.space/v1/blobs/<blobId>`
+- Explorer: [Walruscan (testnet)](https://walruscan.com/testnet/home)
+
+> Live config (package IDs, signer address, Walrus endpoints) is always reported by
+> [`GET /health`](#observability).
 
 ---
 
