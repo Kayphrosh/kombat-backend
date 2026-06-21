@@ -2918,6 +2918,7 @@ impl DbService {
                 mo.name AS opponent_name,
                 mo.image_url AS opponent_image_url,
                 m.videogame_name,
+                m.league_name,
                 m.scheduled_at
             FROM pool_stakes ps
             JOIN matches m ON m.id = ps.match_id
@@ -2943,9 +2944,73 @@ impl DbService {
         .fetch_all(&self.pool)
         .await?;
 
+        // Batch-fetch both opponents for every match referenced by these stakes
+        // (one query, not one-per-stake) so each row can carry the full match.
+        let match_ids: Vec<uuid::Uuid> = {
+            let mut ids: Vec<uuid::Uuid> = rows.iter().map(|r| r.match_id).collect();
+            ids.sort();
+            ids.dedup();
+            ids
+        };
+
+        #[derive(sqlx::FromRow)]
+        struct OpponentRow {
+            match_id: uuid::Uuid,
+            id: uuid::Uuid,
+            name: String,
+            acronym: Option<String>,
+            image_url: Option<String>,
+            position: i16,
+        }
+
+        let mut opponents_by_match: std::collections::HashMap<
+            uuid::Uuid,
+            Vec<crate::models::StakeMatchOpponent>,
+        > = std::collections::HashMap::new();
+
+        if !match_ids.is_empty() {
+            let opponent_rows: Vec<OpponentRow> = sqlx::query_as(
+                r#"SELECT match_id, id, name, acronym, image_url, position
+                   FROM match_opponents
+                   WHERE match_id = ANY($1)
+                   ORDER BY match_id, position ASC"#,
+            )
+            .bind(&match_ids)
+            .fetch_all(&self.pool)
+            .await?;
+
+            for o in opponent_rows {
+                opponents_by_match
+                    .entry(o.match_id)
+                    .or_default()
+                    .push(crate::models::StakeMatchOpponent {
+                        id: o.id,
+                        name: o.name,
+                        acronym: o.acronym,
+                        image_url: o.image_url,
+                        position: o.position,
+                    });
+            }
+        }
+
         let result = rows
             .into_iter()
-            .map(|row| row.into_stake_with_match())
+            .map(|row| {
+                let mut swm = row.into_stake_with_match();
+                let match_id = swm.stake.match_id;
+                swm.match_summary = Some(crate::models::StakeMatchSummary {
+                    id: match_id,
+                    name: swm.match_name.clone(),
+                    status: swm.match_status.clone(),
+                    videogame_name: swm.videogame_name.clone(),
+                    league_name: swm.league_name.clone(),
+                    opponents: opponents_by_match
+                        .get(&match_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                });
+                swm
+            })
             .collect();
         Ok(result)
     }

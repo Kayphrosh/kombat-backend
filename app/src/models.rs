@@ -1460,7 +1460,31 @@ pub struct StakeWithMatch {
     pub opponent_name: String,
     pub opponent_image_url: Option<String>,
     pub videogame_name: Option<String>,
+    pub league_name: Option<String>,
     pub scheduled_at: Option<DateTime<Utc>>,
+    /// Nested match summary with BOTH opponents (ordered by position) so the FE
+    /// can render the pool card without an extra per-stake match fetch.
+    #[serde(rename = "match")]
+    pub match_summary: Option<StakeMatchSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StakeMatchSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub status: String,
+    pub videogame_name: Option<String>,
+    pub league_name: Option<String>,
+    pub opponents: Vec<StakeMatchOpponent>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct StakeMatchOpponent {
+    pub id: Uuid,
+    pub name: String,
+    pub acronym: Option<String>,
+    pub image_url: Option<String>,
+    pub position: i16,
 }
 
 /// Flat row for JOIN query (used internally by db service)
@@ -1486,6 +1510,7 @@ pub struct StakeWithMatchRow {
     pub opponent_name: String,
     pub opponent_image_url: Option<String>,
     pub videogame_name: Option<String>,
+    pub league_name: Option<String>,
     pub scheduled_at: Option<DateTime<Utc>>,
 }
 
@@ -1512,7 +1537,10 @@ impl StakeWithMatchRow {
             opponent_name: self.opponent_name,
             opponent_image_url: self.opponent_image_url,
             videogame_name: self.videogame_name,
+            league_name: self.league_name,
             scheduled_at: self.scheduled_at,
+            // Populated by the query layer after fetching both opponents.
+            match_summary: None,
         }
     }
 }
