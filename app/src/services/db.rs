@@ -1923,18 +1923,27 @@ impl DbService {
         limit: i64,
     ) -> Result<Vec<crate::models::MatchRecord>> {
         let limit = limit.clamp(1, 100);
+        // Only surface matches that can actually have a pool created: upcoming/live,
+        // not yet pooled, AND with exactly two known opponents. Excluding TBD
+        // bracket matches here means a small backfill window is never wasted on
+        // matches that would just be skipped — which previously stalled the
+        // auto-backfill once the earliest-scheduled unpooled matches were all TBD.
         let mut qb = sqlx::QueryBuilder::new(
-            r#"SELECT *
-               FROM matches
-               WHERE sui_pool_object_id IS NULL
-                 AND status IN ('upcoming', 'live')"#,
+            r#"SELECT m.*
+               FROM matches m
+               WHERE m.sui_pool_object_id IS NULL
+                 AND m.status IN ('upcoming', 'live')
+                 AND (
+                     SELECT COUNT(*) FROM match_opponents mo
+                     WHERE mo.match_id = m.id
+                 ) = 2"#,
         );
 
         if let Some(match_ids) = match_ids {
-            qb.push(" AND id = ANY(").push_bind(match_ids).push(")");
+            qb.push(" AND m.id = ANY(").push_bind(match_ids).push(")");
         }
 
-        qb.push(" ORDER BY scheduled_at ASC NULLS LAST, created_at ASC LIMIT ")
+        qb.push(" ORDER BY m.scheduled_at ASC NULLS LAST, m.created_at ASC LIMIT ")
             .push_bind(limit);
 
         Ok(qb
