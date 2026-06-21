@@ -69,6 +69,8 @@ pub struct WagerPtbResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RegisterPushTokenRequest {
+    /// Accept both `expo_token` (original) and `token` (client shorthand).
+    #[serde(alias = "token")]
     pub expo_token: String,
 }
 
@@ -1439,6 +1441,12 @@ pub struct UserStakeStats {
     pub total_lost_usdc: i64,
     pub win_count: i64,
     pub loss_count: i64,
+    // Client (StakeHistoryScreen) expects these names. Kept alongside the
+    // originals so existing consumers are unaffected.
+    pub total_active: i64,
+    pub total_won: i64,
+    pub total_lost: i64,
+    pub total_refunded: i64,
 }
 
 // ─── Stake with Match Info (for user's stake list) ────────────────────────────

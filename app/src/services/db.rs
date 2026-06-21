@@ -2109,9 +2109,10 @@ impl DbService {
         }
 
         match query.source.as_deref().map(str::trim) {
-            None | Some("") => {
-                qb.push(" AND source = 'grid'");
-            }
+            // Default: return matches from all providers (PandaScore + GRID).
+            // Previously defaulted to GRID-only, which hid the PandaScore feed
+            // unless the client explicitly passed `source=all`.
+            None | Some("") => {}
             Some(source)
                 if source.eq_ignore_ascii_case("all") || source.eq_ignore_ascii_case("any") => {}
             Some(source) => {
@@ -2996,6 +2997,13 @@ impl DbService {
         .fetch_one(&self.pool)
         .await?;
 
+        let total_refunded: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(amount_usdc), 0)::BIGINT FROM pool_stakes WHERE user_wallet = $1 AND status = 'refunded'"
+        )
+        .bind(wallet)
+        .fetch_one(&self.pool)
+        .await?;
+
         Ok(crate::models::UserStakeStats {
             active_stakes,
             total_staked_usdc: total_staked,
@@ -3003,6 +3011,11 @@ impl DbService {
             total_lost_usdc: total_lost,
             win_count,
             loss_count,
+            // Client-facing aliases.
+            total_active: active_stakes,
+            total_won,
+            total_lost,
+            total_refunded,
         })
     }
 

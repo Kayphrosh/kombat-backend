@@ -259,12 +259,22 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/users/:wallet/push-token", post(register_push_token))
         .route("/users/:wallet/push-token", post(register_push_token))
+        // Plural aliases (client uses POST .../push-tokens with { token })
+        .route("/api/users/:wallet/push-tokens", post(register_push_token))
+        .route("/users/:wallet/push-tokens", post(register_push_token))
         // ── Notifications ────────────────────────────────────────────────────
         .route("/notifications/:wallet", get(list_notifications))
-        .route("/notifications/:id/read", post(mark_notification_read))
+        // Accept both POST and PATCH for marking a notification read.
+        .route(
+            "/notifications/:id/read",
+            post(mark_notification_read).patch(mark_notification_read),
+        )
         .route("/notifications/stream/:wallet", get(stream_notifications))
         .route("/api/notifications/:wallet", get(list_notifications))
-        .route("/api/notifications/:id/read", post(mark_notification_read))
+        .route(
+            "/api/notifications/:id/read",
+            post(mark_notification_read).patch(mark_notification_read),
+        )
         // ── Auth ─────────────────────────────────────────────────────────────
         .route("/api/auth/verify", post(handlers::auth::verify_dynamic))
         // ── Sui ──────────────────────────────────────────────────────────────
@@ -341,6 +351,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/transak/quote", post(get_transak_quote))
         // ── File upload ──────────────────────────────────────────────────────
         .route("/api/uploads", post(upload_file))
+        // Alias: client uploads dispute/evidence images to /api/files
+        .route("/api/files", post(upload_file))
         // ── Walrus artifacts / agent evidence ───────────────────────────────
         .route("/api/walrus/config", get(get_walrus_config))
         .route("/api/walrus/artifacts", post(create_walrus_artifact))

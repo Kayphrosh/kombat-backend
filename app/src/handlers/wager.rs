@@ -70,6 +70,18 @@ pub async fn create_wager(
         None => None,
     };
 
+    // Default new wagers to mutual-consent resolution so both parties can
+    // declare a winner. Only fall back to the original when explicitly set to
+    // a non-empty value.
+    let resolution_source = {
+        let v = req.resolution_source.trim();
+        if v.is_empty() {
+            "mutual_consent".to_string()
+        } else {
+            v.to_string()
+        }
+    };
+
     let record = WagerRecord {
         id: uuid::Uuid::new_v4(),
         on_chain_address: req.on_chain_address.clone(),
@@ -79,7 +91,7 @@ pub async fn create_wager(
         stake_usdc: req.stake_usdc as i64,
         description: req.description.clone(),
         status: "open".to_string(),
-        resolution_source: req.resolution_source.clone(),
+        resolution_source: resolution_source.clone(),
         resolver: req.resolver.clone(),
         expiry_ts: req.expiry_ts,
         created_at: Utc::now(),
