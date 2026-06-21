@@ -41,7 +41,11 @@ pub async fn upload_file(
                     .map_err(|e| bad_request(format!("Failed to read file: {}", e)))?;
                 file_data = Some(bytes.to_vec());
             }
-            "type" => {
+            // Accept "type", "file_type", and "category" as the category field.
+            // Clients in the wild send different names; aligning them here keeps
+            // durable categories (e.g. dispute evidence) routed to Walrus instead
+            // of silently falling back to non-durable local storage.
+            "type" | "file_type" | "category" => {
                 let text = field
                     .text()
                     .await
