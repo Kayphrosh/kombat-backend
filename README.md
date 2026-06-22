@@ -27,6 +27,7 @@ fetchable and verifiable:
 
 > Live config (package IDs, signer address, Walrus endpoints) is always reported by
 > [`GET /health`](#observability).
+> curl "https://kombat-backend-production.up.railway.app/api/walrus/artifacts?artifact_type=settlement_proof"
 
 ---
 
