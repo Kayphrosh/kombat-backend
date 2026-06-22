@@ -13,6 +13,9 @@ platform-signer.json
 sui/build/
 sui-wager/build/
 
+Dockerfile
+docker-compose.yml
+
 # Markdown docs
 *.md
 !FRONTEND_INTEGRATION.md
