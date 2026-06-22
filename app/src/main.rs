@@ -68,6 +68,7 @@ use handlers::wager::{
 };
 use handlers::walrus::{
     create_walrus_artifact, get_walrus_artifact, get_walrus_blob_url, get_walrus_config,
+    list_walrus_artifacts,
 };
 use handlers::webhook::{handle_match_result_webhook, handle_pandascore_webhook};
 use prometheus::{Encoder, IntCounter, TextEncoder};
@@ -357,7 +358,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/files", post(upload_file))
         // ── Walrus artifacts / agent evidence ───────────────────────────────
         .route("/api/walrus/config", get(get_walrus_config))
-        .route("/api/walrus/artifacts", post(create_walrus_artifact))
+        .route(
+            "/api/walrus/artifacts",
+            get(list_walrus_artifacts).post(create_walrus_artifact),
+        )
         .route("/api/walrus/artifacts/:id", get(get_walrus_artifact))
         .route("/api/walrus/blobs/:blob_id/url", get(get_walrus_blob_url))
         .route(

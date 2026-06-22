@@ -1677,6 +1677,28 @@ impl DbService {
         .await?)
     }
 
+    pub async fn list_walrus_artifacts(
+        &self,
+        artifact_type: Option<&str>,
+        owner_wallet: Option<&str>,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<crate::models::WalrusArtifactRecord>> {
+        Ok(sqlx::query_as::<_, crate::models::WalrusArtifactRecord>(
+            r#"SELECT * FROM walrus_artifacts
+               WHERE ($1::text IS NULL OR artifact_type = $1)
+                 AND ($2::text IS NULL OR owner_wallet = $2)
+               ORDER BY created_at DESC
+               LIMIT $3 OFFSET $4"#,
+        )
+        .bind(artifact_type)
+        .bind(owner_wallet)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     pub async fn get_walrus_artifact(
         &self,
         artifact_id: uuid::Uuid,

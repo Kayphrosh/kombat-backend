@@ -1,5 +1,5 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     Json,
 };
@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use crate::{
     models::{
-        ApiResponse, CreateWalrusArtifactRequest, WalrusArtifactRecord, WalrusArtifactResponse,
-        WalrusBlobUrlResponse, WalrusConfigResponse,
+        ApiResponse, CreateWalrusArtifactRequest, ListWalrusArtifactsQuery, WalrusArtifactRecord,
+        WalrusArtifactResponse, WalrusBlobUrlResponse, WalrusConfigResponse,
     },
     services::{auth::verify_jwt_get_wallet, sui::SuiService},
     state::AppState,
@@ -33,6 +33,25 @@ fn unauthorized(msg: impl Into<String>) -> (StatusCode, Json<ApiResponse<()>>) {
 
 fn not_found(msg: impl Into<String>) -> (StatusCode, Json<ApiResponse<()>>) {
     (StatusCode::NOT_FOUND, Json(ApiResponse::err(msg)))
+}
+
+pub async fn list_walrus_artifacts(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<ListWalrusArtifactsQuery>,
+) -> AppResult<Vec<WalrusArtifactRecord>> {
+    let limit = params.limit.unwrap_or(20).min(100) as i64;
+    let offset = params.offset.unwrap_or(0) as i64;
+    let artifacts = state
+        .db
+        .list_walrus_artifacts(
+            params.artifact_type.as_deref(),
+            params.owner_wallet.as_deref(),
+            limit,
+            offset,
+        )
+        .await
+        .map_err(|e| internal_error(e.to_string()))?;
+    Ok(Json(ApiResponse::ok(artifacts)))
 }
 
 pub async fn get_walrus_config(

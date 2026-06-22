@@ -844,6 +844,14 @@ pub struct WalrusArtifactRecord {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct ListWalrusArtifactsQuery {
+    pub artifact_type: Option<String>,
+    pub owner_wallet: Option<String>,
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateWalrusArtifactRequest {
     pub artifact_type: String,
     pub owner_wallet: Option<String>,
