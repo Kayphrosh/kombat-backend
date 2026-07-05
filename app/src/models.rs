@@ -1146,12 +1146,17 @@ pub struct WalletTransactionItem {
     pub id: String,
     pub kind: String,
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub subtitle: Option<String>,
     pub amount_usdc: i64,
     pub direction: String,
-    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub tx_hash: Option<String>,
-    pub occurred_at: DateTime<Utc>,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<JsonValue>,
 }
 
 // ─── Transak On-Ramp Fallback ────────────────────────────────────────────────

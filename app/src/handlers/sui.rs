@@ -323,7 +323,7 @@ async fn get_network_wallet_dashboard(
         .map_err(|e| internal_error(e.to_string()))?;
     let transaction_history = state
         .db
-        .list_wallet_transactions(&wallet, query.limit, query.offset)
+        .list_wallet_transactions(&wallet, &config.network, query.limit, query.offset)
         .await
         .map_err(|e| internal_error(e.to_string()))?;
 

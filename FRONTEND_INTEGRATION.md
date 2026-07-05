@@ -161,13 +161,25 @@ type WalletDashboardResponse = {
   total_balance_usdc: number;
   transaction_history: Array<{
     id: string;
-    kind: string;
+    kind:
+      | "fund_wallet"
+      | "stake_lost"
+      | "stake_locked"
+      | "stake_won"
+      | "withdrawal";
     title: string;
     subtitle?: string | null;
     amount_usdc: number;
     direction: "in" | "out";
     created_at: string;
-    metadata?: unknown;
+    status?: "success" | "failed" | "pending";
+    tx_hash?: string;
+    metadata?: {
+      wager_id?: string;
+      match_id?: string;
+      match_title?: string;
+      counterparty_wallet?: string;
+    };
   }>;
   actions: {
     fund_wallet: {

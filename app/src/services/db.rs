@@ -82,6 +82,7 @@ impl DbService {
         Self::ensure_notification_schema(&pool).await?;
         Self::ensure_wager_resolution_columns(&pool).await?;
         Self::ensure_user_email_column(&pool).await?;
+        Self::ensure_wallet_events_schema(&pool).await?;
         Ok(Self { pool })
     }
 
@@ -142,6 +143,62 @@ impl DbService {
         )
         .execute(pool)
         .await?;
+
+        Ok(())
+    }
+
+    async fn ensure_wallet_events_schema(pool: &PgPool) -> Result<()> {
+        sqlx::query(
+            r#"
+            CREATE TABLE IF NOT EXISTS wallet_events (
+                id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                wallet          TEXT NOT NULL,
+                network         VARCHAR(30) NOT NULL DEFAULT 'testnet',
+                kind            VARCHAR(40) NOT NULL CHECK (
+                    kind IN (
+                        'fund_wallet',
+                        'stake_lost',
+                        'stake_locked',
+                        'stake_won',
+                        'withdrawal'
+                    )
+                ),
+                title           TEXT NOT NULL,
+                subtitle        TEXT,
+                amount_usdc     BIGINT NOT NULL CHECK (amount_usdc >= 0),
+                direction       VARCHAR(8) NOT NULL CHECK (direction IN ('in', 'out')),
+                status          VARCHAR(20) CHECK (status IN ('success', 'failed', 'pending')),
+                tx_hash         TEXT,
+                metadata        JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            "#,
+        )
+        .execute(pool)
+        .await
+        .context("failed to ensure wallet_events table")?;
+
+        sqlx::query(
+            r#"
+            CREATE INDEX IF NOT EXISTS idx_wallet_events_wallet_network_created
+                ON wallet_events(wallet, network, created_at DESC)
+            "#,
+        )
+        .execute(pool)
+        .await
+        .context("failed to ensure wallet_events wallet/network index")?;
+
+        sqlx::query(
+            r#"
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_wallet_events_wallet_network_tx_kind
+                ON wallet_events(wallet, network, tx_hash, kind)
+                WHERE tx_hash IS NOT NULL
+            "#,
+        )
+        .execute(pool)
+        .await
+        .context("failed to ensure wallet_events transaction idempotency index")?;
 
         Ok(())
     }
@@ -3140,6 +3197,7 @@ impl DbService {
     pub async fn list_wallet_transactions(
         &self,
         wallet: &str,
+        network: &str,
         limit: Option<i64>,
         offset: Option<i64>,
     ) -> Result<Vec<crate::models::WalletTransactionItem>> {
@@ -3148,71 +3206,92 @@ impl DbService {
 
         let transactions: Vec<crate::models::WalletTransactionItem> = sqlx::query_as(
             r#"
-            WITH stake_events AS (
+            WITH ledger_events AS (
                 SELECT
-                    ps.id::TEXT || ':stake' AS id,
-                    CASE
-                        WHEN ps.status = 'active' THEN 'stake_locked'
-                        ELSE 'stake_placed'
-                    END AS kind,
-                    'Stake locked · ' || m.name AS title,
-                    mo.name AS subtitle,
-                    -ps.amount_usdc AS amount_usdc,
+                    we.id::TEXT AS id,
+                    we.kind,
+                    we.title,
+                    we.subtitle,
+                    we.amount_usdc,
+                    we.direction,
+                    we.status,
+                    we.tx_hash,
+                    we.created_at,
+                    NULLIF(we.metadata, '{}'::jsonb) AS metadata
+                FROM wallet_events we
+                WHERE we.wallet = $1
+                  AND we.network = $2
+            ),
+            stake_events AS (
+                SELECT
+                    ps.id::TEXT || ':locked' AS id,
+                    'stake_locked' AS kind,
+                    'Stake locked' AS title,
+                    m.name AS subtitle,
+                    ps.amount_usdc AS amount_usdc,
                     'out' AS direction,
-                    ps.status AS status,
+                    'success' AS status,
                     ps.stake_tx_hash AS tx_hash,
-                    ps.created_at AS occurred_at
+                    ps.created_at AS created_at,
+                    jsonb_build_object(
+                        'match_id', m.id::TEXT,
+                        'match_title', m.name
+                    ) AS metadata
                 FROM pool_stakes ps
                 JOIN matches m ON m.id = ps.match_id
-                JOIN match_opponents mo ON mo.id = ps.opponent_id
                 WHERE ps.user_wallet = $1
+                  AND ps.status = 'active'
+                  AND (m.sui_network IS NULL OR m.sui_network = $2)
             ),
             resolution_events AS (
                 SELECT
                     ps.id::TEXT || ':resolution' AS id,
                     CASE
-                        WHEN ps.status = 'won' THEN 'won'
-                        WHEN ps.status = 'lost' THEN 'lost'
-                        WHEN ps.status = 'refunded' THEN 'refunded'
-                        ELSE ps.status
+                        WHEN ps.status = 'won' THEN 'stake_won'
+                        WHEN ps.status = 'lost' THEN 'stake_lost'
+                        WHEN ps.status = 'refunded' THEN 'stake_won'
                     END AS kind,
                     CASE
-                        WHEN ps.status = 'won' THEN 'Won · ' || m.name
-                        WHEN ps.status = 'lost' THEN 'Lost · ' || m.name
-                        WHEN ps.status = 'refunded' THEN 'Refunded · ' || m.name
-                        ELSE initcap(ps.status) || ' · ' || m.name
+                        WHEN ps.status = 'won' THEN 'Won'
+                        WHEN ps.status = 'lost' THEN 'Lost'
+                        WHEN ps.status = 'refunded' THEN 'Refunded'
                     END AS title,
-                    mo.name AS subtitle,
+                    m.name AS subtitle,
                     CASE
                         WHEN ps.status = 'won' THEN COALESCE(ps.payout_usdc, 0)
                         WHEN ps.status = 'refunded' THEN ps.amount_usdc
-                        WHEN ps.status = 'lost' THEN -ps.amount_usdc
-                        ELSE 0
+                        WHEN ps.status = 'lost' THEN ps.amount_usdc
                     END AS amount_usdc,
                     CASE
                         WHEN ps.status IN ('won', 'refunded') THEN 'in'
                         WHEN ps.status = 'lost' THEN 'out'
-                        ELSE 'neutral'
                     END AS direction,
-                    ps.status AS status,
+                    'success' AS status,
                     COALESCE(ps.payout_tx_hash, ps.stake_tx_hash) AS tx_hash,
-                    COALESCE(ps.resolved_at, ps.created_at) AS occurred_at
+                    COALESCE(ps.resolved_at, ps.created_at) AS created_at,
+                    jsonb_build_object(
+                        'match_id', m.id::TEXT,
+                        'match_title', m.name
+                    ) AS metadata
                 FROM pool_stakes ps
                 JOIN matches m ON m.id = ps.match_id
-                JOIN match_opponents mo ON mo.id = ps.opponent_id
                 WHERE ps.user_wallet = $1
                   AND ps.status IN ('won', 'lost', 'refunded')
+                  AND (m.sui_network IS NULL OR m.sui_network = $2)
             )
             SELECT * FROM (
+                SELECT * FROM ledger_events
+                UNION ALL
                 SELECT * FROM stake_events
                 UNION ALL
                 SELECT * FROM resolution_events
             ) events
-            ORDER BY occurred_at DESC
-            LIMIT $2 OFFSET $3
+            ORDER BY created_at DESC
+            LIMIT $3 OFFSET $4
             "#,
         )
         .bind(wallet)
+        .bind(network)
         .bind(limit)
         .bind(offset)
         .fetch_all(&self.pool)
