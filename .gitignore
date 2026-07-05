@@ -18,4 +18,4 @@ docker-compose.yml
 
 # Markdown docs
 *.md
-!FRONTEND_INTEGRATION.md
+
