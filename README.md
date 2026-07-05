@@ -504,7 +504,3 @@ migration step is needed beyond the ordered files in `migrations/`, which run on
 - Watch worker logs for `auto_backfill=true` and rising `created` counts to confirm the
   import → stakeable pipeline is healthy.
 
----
-
-_For client/API contract details (endpoints, payloads, auth, PTB signing), see
-[`docs/frontend-integration-guide.md`](docs/frontend-integration-guide.md)._
