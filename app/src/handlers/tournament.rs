@@ -711,7 +711,7 @@ pub async fn ingest_pandascore_match(
     let auto_backfill = std::env::var("POOL_AUTO_BACKFILL")
         .ok()
         .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(false);
+        .unwrap_or(true);
     let mut pool_created = false;
     if auto_backfill
         && !is_finished

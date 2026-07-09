@@ -211,6 +211,7 @@ impl SuiService {
 
         let signer = crate::services::sui_tx::PlatformSigner::from_env()
             .ok_or_else(|| anyhow::anyhow!("PLATFORM_SIGNER_KEYPAIR not configured"))?;
+        let gas_budget = create_pool_gas_budget_mist();
 
         let executed = signer
             .move_call_execute_detailed(
@@ -228,7 +229,7 @@ impl SuiService {
                     serde_json::json!(stake_deadline_ms.to_string()),
                     serde_json::json!("0x6"),
                 ],
-                100_000_000,
+                gas_budget,
             )
             .await?;
 
@@ -418,6 +419,14 @@ impl SuiService {
             .result
             .ok_or_else(|| anyhow!("Sui RPC response for {} had no result", method))
     }
+}
+
+fn create_pool_gas_budget_mist() -> u64 {
+    std::env::var("SUI_CREATE_POOL_GAS_BUDGET_MIST")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(50_000_000)
 }
 
 fn canonical_network(network: &str) -> Option<String> {

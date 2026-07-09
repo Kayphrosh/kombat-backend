@@ -217,6 +217,8 @@ async fn main() -> anyhow::Result<()> {
     spawn_pandascore_scheduler(state.clone());
     // Fast loop for near-real-time live/just-finished match updates.
     spawn_pandascore_live_poller(state.clone());
+    // Create missing on-chain pools independently of provider sync loops.
+    spawn_pool_backfill_scheduler(state.clone());
     // Index on-chain stakes into the DB so pool/staker aggregates stay correct.
     spawn_stake_reconciler(state.clone());
 
@@ -521,7 +523,7 @@ async fn get_metrics() -> impl axum::response::IntoResponse {
 ///
 /// Controlled by env:
 /// - `PANDASCORE_AUTO_SYNC` (default: enabled when PandaScore is configured)
-/// - `PANDASCORE_SYNC_INTERVAL_MINUTES` (default: 30)
+/// - `PANDASCORE_SYNC_INTERVAL_MINUTES` (default: 10)
 fn spawn_pandascore_scheduler(state: Arc<AppState>) {
     if !state.pandascore.config().configured() {
         tracing::info!("PandaScore auto-sync disabled: provider not configured");
@@ -543,26 +545,9 @@ fn spawn_pandascore_scheduler(state: Arc<AppState>) {
         .filter(|v| *v > 0)
         .unwrap_or(10);
 
-    // When enabled, the scheduler also creates on-chain pools for newly-complete
-    // matches after each sync, so the import->stakeable pipeline is hands-off.
-    // Defaults to ON so a missing env var doesn't silently leave upcoming
-    // matches un-stakeable; set POOL_AUTO_BACKFILL=false to disable.
-    let auto_backfill = std::env::var("POOL_AUTO_BACKFILL")
-        .ok()
-        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-        .unwrap_or(true);
-    // Cap pools created per cycle so a cold start doesn't fire hundreds of
-    // on-chain transactions at once.
-    let backfill_limit = std::env::var("POOL_AUTO_BACKFILL_LIMIT")
-        .ok()
-        .and_then(|v| v.parse::<i64>().ok())
-        .filter(|v| *v > 0)
-        .unwrap_or(25);
-
     tracing::info!(
-        "PandaScore auto-sync enabled: every {} minute(s) (auto_backfill={})",
-        interval_minutes,
-        auto_backfill
+        "PandaScore auto-sync enabled: every {} minute(s)",
+        interval_minutes
     );
 
     tokio::spawn(async move {
@@ -595,26 +580,70 @@ fn spawn_pandascore_scheduler(state: Arc<AppState>) {
                 ),
                 Err(e) => tracing::warn!("PandaScore auto-sync failed: {}", e),
             }
+        }
+    });
+}
 
-            if auto_backfill {
-                match handlers::tournament::run_pool_backfill(
-                    &state,
-                    None,
-                    None,
-                    Some(backfill_limit),
-                    None,
-                )
-                .await
-                {
-                    Ok(resp) => tracing::info!(
-                        "Pool auto-backfill: attempted={} created={} skipped={} failed={}",
-                        resp.attempted,
-                        resp.created,
-                        resp.skipped,
-                        resp.failed
-                    ),
-                    Err(e) => tracing::warn!("Pool auto-backfill failed: {}", e),
-                }
+/// Background pool creator: finds active matches with exactly two opponents and
+/// no registered Sui pool, then creates the missing on-chain pool. This is
+/// intentionally independent of provider sync so manual imports, GRID rows, and
+/// webhook-only updates still become stakeable.
+///
+/// Controlled by env:
+/// - `POOL_AUTO_BACKFILL` (default: on)
+/// - `POOL_AUTO_BACKFILL_INTERVAL_MINUTES` (default: 5)
+/// - `POOL_AUTO_BACKFILL_LIMIT` (default: 25)
+fn spawn_pool_backfill_scheduler(state: Arc<AppState>) {
+    let enabled = std::env::var("POOL_AUTO_BACKFILL")
+        .ok()
+        .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(true);
+    if !enabled {
+        tracing::info!("Pool auto-backfill disabled via POOL_AUTO_BACKFILL");
+        return;
+    }
+
+    let interval_minutes = std::env::var("POOL_AUTO_BACKFILL_INTERVAL_MINUTES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(5);
+    let backfill_limit = std::env::var("POOL_AUTO_BACKFILL_LIMIT")
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(25);
+
+    tracing::info!(
+        "Pool auto-backfill enabled: every {} minute(s), up to {} match(es)/cycle",
+        interval_minutes,
+        backfill_limit
+    );
+
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+        let mut ticker =
+            tokio::time::interval(std::time::Duration::from_secs(interval_minutes * 60));
+
+        loop {
+            ticker.tick().await;
+            match handlers::tournament::run_pool_backfill(
+                &state,
+                None,
+                None,
+                Some(backfill_limit),
+                None,
+            )
+            .await
+            {
+                Ok(resp) => tracing::info!(
+                    "Pool auto-backfill: attempted={} created={} skipped={} failed={}",
+                    resp.attempted,
+                    resp.created,
+                    resp.skipped,
+                    resp.failed
+                ),
+                Err(e) => tracing::warn!("Pool auto-backfill failed: {}", e),
             }
         }
     });

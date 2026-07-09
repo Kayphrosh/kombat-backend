@@ -1090,6 +1090,10 @@ The backend can also create and register missing pools in one admin backfill cal
 - `SUI_PACKAGE_ID` or `SUI_TESTNET_PACKAGE_ID`: package containing `tournament_staking`.
 - `SUI_ADMIN_CAP_OBJECT_ID` or `SUI_TESTNET_ADMIN_CAP_OBJECT_ID`: staking `AdminCap` object.
 - `SUI_USDC_COIN_TYPE` or `SUI_TESTNET_USDC_COIN_TYPE`: coin type used by pools.
+- `SUI_CREATE_POOL_GAS_BUDGET_MIST`: gas budget per pool creation tx (default `50000000`).
+- `POOL_AUTO_BACKFILL`: enable the boot-time periodic pool worker (default `true`).
+- `POOL_AUTO_BACKFILL_INTERVAL_MINUTES`: worker cadence (default `5`).
+- `POOL_AUTO_BACKFILL_LIMIT`: max pools created per cycle (default `25`).
 
 ```http
 POST /api/admin/tournaments/pools/backfill

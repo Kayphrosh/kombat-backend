@@ -208,7 +208,7 @@ flowchart TB
 |------|---------|-----|
 | **Full sync** | 10 min | Pull upcoming/running/past, upsert matches & opponents, advance stale statuses |
 | **Live poller** | 60 s | Refresh live + just-finished matches (≈2 API calls/cycle) for near-real-time status/score |
-| **Pool auto-backfill** | per sync | Create an on-chain Sui pool for every complete match so it becomes stakeable, hands-off |
+| **Pool auto-backfill** | 5 min | Create an on-chain Sui pool for active two-opponent matches so they become stakeable, hands-off |
 
 A **realtime webhook** endpoint (`POST /api/webhooks/pandascore`) is also wired for instant
 push updates where the provider plan supports it; the poller is the no-webhook fallback so
@@ -373,13 +373,14 @@ flowchart TB
 
 ## Background Workers
 
-Spawned at boot (see `spawn_pandascore_scheduler` / `spawn_pandascore_live_poller` in
+Spawned at boot (see `spawn_pandascore_scheduler` / `spawn_pandascore_live_poller` / `spawn_pool_backfill_scheduler` in
 `app/src/main.rs`):
 
 - **PandaScore full sync** — `PANDASCORE_SYNC_INTERVAL_MINUTES` (default 10)
 - **Live poller** — `PANDASCORE_LIVE_POLL_SECONDS` (default 60)
-- **Pool auto-backfill** — `POOL_AUTO_BACKFILL` (default on when signer configured), capped by
-  `POOL_AUTO_BACKFILL_LIMIT` (default 25/cycle)
+- **Pool auto-backfill** — `POOL_AUTO_BACKFILL` (default on), every
+  `POOL_AUTO_BACKFILL_INTERVAL_MINUTES` (default 5), capped by `POOL_AUTO_BACKFILL_LIMIT`
+  (default 25/cycle)
 
 All are env-gated and degrade safely: a failed cycle logs a warning and retries next tick.
 
@@ -434,6 +435,7 @@ PLATFORM_SIGNER_KEYPAIR=[64-byte JSON array]      # owns the staking AdminCap
 SUI_TESTNET_PACKAGE_ID=0x...
 SUI_TESTNET_ADMIN_CAP_OBJECT_ID=0x...
 SUI_TESTNET_USDC_COIN_TYPE=0x...::usdc::USDC
+SUI_CREATE_POOL_GAS_BUDGET_MIST=50000000
 
 # Match data
 PANDASCORE_API_KEY=...
@@ -445,6 +447,7 @@ GRID_BASE_URL=https://api-op.grid.gg
 
 # Pools
 POOL_AUTO_BACKFILL=true
+POOL_AUTO_BACKFILL_INTERVAL_MINUTES=5
 POOL_AUTO_BACKFILL_LIMIT=25
 MATCH_STALE_UPCOMING_HOURS=4
 
@@ -501,6 +504,7 @@ migration step is needed beyond the ordered files in `migrations/`, which run on
   for pool creation and settlement.
 - The signer must **own the staking AdminCap**; don't overwrite `PLATFORM_SIGNER_KEYPAIR` with
   a key that doesn't.
-- Watch worker logs for `auto_backfill=true` and rising `created` counts to confirm the
+- If pool creation logs say no gas coin is large enough, fund/consolidate the signer or lower
+  `SUI_CREATE_POOL_GAS_BUDGET_MIST` enough for one gas coin to cover it.
+- Watch worker logs for `Pool auto-backfill enabled` and rising `created` counts to confirm the
   import → stakeable pipeline is healthy.
-

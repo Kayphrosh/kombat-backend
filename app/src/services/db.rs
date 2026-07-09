@@ -1768,6 +1768,35 @@ impl DbService {
         .await?)
     }
 
+    pub async fn get_walrus_artifact_by_blob_id(
+        &self,
+        blob_id: &str,
+    ) -> Result<Option<crate::models::WalrusArtifactRecord>> {
+        Ok(sqlx::query_as::<_, crate::models::WalrusArtifactRecord>(
+            "SELECT * FROM walrus_artifacts WHERE blob_id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(blob_id)
+        .fetch_optional(&self.pool)
+        .await?)
+    }
+
+    pub async fn list_walrus_artifacts_by_match(
+        &self,
+        match_id: uuid::Uuid,
+        limit: i64,
+    ) -> Result<Vec<crate::models::WalrusArtifactRecord>> {
+        Ok(sqlx::query_as::<_, crate::models::WalrusArtifactRecord>(
+            r#"SELECT * FROM walrus_artifacts
+               WHERE match_id = $1
+               ORDER BY created_at DESC
+               LIMIT $2"#,
+        )
+        .bind(match_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn create_agent_run_for_proposal(
         &self,
