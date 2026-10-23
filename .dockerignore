@@ -1,0 +1,12 @@
+.git
+.env
+.env.*
+secrets
+**/*keypair*.json
+platform-signer.json
+target
+**/target
+node_modules
+uploads
+test-ledger
+.DS_Store

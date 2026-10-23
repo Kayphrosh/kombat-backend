@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: kombat-backend
+    runtime: docker
+    plan: free
+    region: frankfurt
+    dockerfilePath: ./Dockerfile.render
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: AUTH_JWT_SECRET
+        generateValue: true
+      - key: RUST_LOG
+        value: wager_api=info,tower_http=info
